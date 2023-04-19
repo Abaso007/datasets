@@ -68,7 +68,7 @@ def test_fs_isfile(protocol, zip_jsonl_path, jsonl_gz_path):
     path = f"{protocol}://{member_file_path}::{compressed_file_path}"
     fs, *_ = fsspec.get_fs_token_paths(path)
     assert fs.isfile(member_file_path)
-    assert not fs.isfile("non_existing_" + member_file_path)
+    assert not fs.isfile(f"non_existing_{member_file_path}")
 
 
 @pytest.mark.integration

@@ -57,11 +57,15 @@ class Parquet(datasets.ArrowBasedBuilder):
 
     def _generate_tables(self, files):
         schema = self.config.features.arrow_schema if self.config.features is not None else None
-        if self.config.features is not None and self.config.columns is not None:
-            if sorted(field.name for field in schema) != sorted(self.config.columns):
-                raise ValueError(
-                    f"Tried to load parquet data with columns '{self.config.columns}' with mismatching features '{self.config.features}'"
-                )
+        if (
+            self.config.features is not None
+            and self.config.columns is not None
+            and sorted(field.name for field in schema)
+            != sorted(self.config.columns)
+        ):
+            raise ValueError(
+                f"Tried to load parquet data with columns '{self.config.columns}' with mismatching features '{self.config.features}'"
+            )
         for file_idx, file in enumerate(itertools.chain.from_iterable(files)):
             with open(file, "rb") as f:
                 parquet_file = pq.ParquetFile(f)

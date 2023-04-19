@@ -57,14 +57,16 @@ def verify_checksums(expected_checksums: Optional[dict], recorded_checksums: dic
     if len(set(recorded_checksums) - set(expected_checksums)) > 0:
         raise UnexpectedDownloadedFile(str(set(recorded_checksums) - set(expected_checksums)))
     bad_urls = [url for url in expected_checksums if expected_checksums[url] != recorded_checksums[url]]
-    for_verification_name = " for " + verification_name if verification_name is not None else ""
-    if len(bad_urls) > 0:
+    for_verification_name = (
+        f" for {verification_name}" if verification_name is not None else ""
+    )
+    if bad_urls:
         raise NonMatchingChecksumError(
             f"Checksums didn't match{for_verification_name}:\n"
             f"{bad_urls}\n"
             "Set `verification_mode='no_checks'` to skip checksums verification and ignore this error"
         )
-    logger.info("All the checksums matched successfully" + for_verification_name)
+    logger.info(f"All the checksums matched successfully{for_verification_name}")
 
 
 class SplitsVerificationException(Exception):
@@ -91,12 +93,12 @@ def verify_splits(expected_splits: Optional[dict], recorded_splits: dict):
         raise ExpectedMoreSplits(str(set(expected_splits) - set(recorded_splits)))
     if len(set(recorded_splits) - set(expected_splits)) > 0:
         raise UnexpectedSplits(str(set(recorded_splits) - set(expected_splits)))
-    bad_splits = [
+    if bad_splits := [
         {"expected": expected_splits[name], "recorded": recorded_splits[name]}
         for name in expected_splits
-        if expected_splits[name].num_examples != recorded_splits[name].num_examples
-    ]
-    if len(bad_splits) > 0:
+        if expected_splits[name].num_examples
+        != recorded_splits[name].num_examples
+    ]:
         raise NonMatchingSplitsSizesError(str(bad_splits))
     logger.info("All the splits matched successfully.")
 

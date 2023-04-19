@@ -61,13 +61,10 @@ def _query_table_with_indices_mapping(
         return _query_table(table, key)
     if isinstance(key, slice):
         key = range(*key.indices(indices.num_rows))
-    if isinstance(key, range):
-        if _is_range_contiguous(key) and key.start >= 0:
-            return _query_table(
-                table, [i.as_py() for i in indices.fast_slice(key.start, key.stop - key.start).column(0)]
-            )
-        else:
-            pass  # treat as an iterable
+    if isinstance(key, range) and _is_range_contiguous(key) and key.start >= 0:
+        return _query_table(
+            table, [i.as_py() for i in indices.fast_slice(key.start, key.stop - key.start).column(0)]
+        )
     if isinstance(key, str):
         table = table.select([key])
         return _query_table(table, indices.column(0).to_pylist())
@@ -85,11 +82,8 @@ def _query_table(table: Table, key: Union[int, slice, range, str, Iterable]) -> 
         return table.fast_slice(key % table.num_rows, 1)
     if isinstance(key, slice):
         key = range(*key.indices(table.num_rows))
-    if isinstance(key, range):
-        if _is_range_contiguous(key) and key.start >= 0:
-            return table.fast_slice(key.start, key.stop - key.start)
-        else:
-            pass  # treat as an iterable
+    if isinstance(key, range) and _is_range_contiguous(key) and key.start >= 0:
+        return table.fast_slice(key.start, key.stop - key.start)
     if isinstance(key, str):
         return table.table.drop([column for column in table.column_names if column != key])
     if isinstance(key, Iterable):
@@ -168,16 +162,21 @@ class NumpyArrowExtractor(BaseArrowExtractor[dict, np.ndarray, dict]):
             if isinstance(pa_array.type, _ArrayXDExtensionType):
                 # don't call to_pylist() to preserve dtype of the fixed-size array
                 zero_copy_only = _is_zero_copy_only(pa_array.type.storage_dtype, unnest=True)
-                if pa_array.type.shape[0] is None:
-                    array: List = [
+                array: List = (
+                    [
                         row
                         for chunk in pa_array.chunks
-                        for row in chunk.to_list_of_numpy(zero_copy_only=zero_copy_only)
+                        for row in chunk.to_list_of_numpy(
+                            zero_copy_only=zero_copy_only
+                        )
                     ]
-                else:
-                    array: List = [
-                        row for chunk in pa_array.chunks for row in chunk.to_numpy(zero_copy_only=zero_copy_only)
+                    if pa_array.type.shape[0] is None
+                    else [
+                        row
+                        for chunk in pa_array.chunks
+                        for row in chunk.to_numpy(zero_copy_only=zero_copy_only)
                     ]
+                )
             else:
                 zero_copy_only = _is_zero_copy_only(pa_array.type) and all(
                     not _is_array_with_nulls(chunk) for chunk in pa_array.chunks
@@ -185,24 +184,25 @@ class NumpyArrowExtractor(BaseArrowExtractor[dict, np.ndarray, dict]):
                 array: List = [
                     row for chunk in pa_array.chunks for row in chunk.to_numpy(zero_copy_only=zero_copy_only)
                 ]
-        else:
-            if isinstance(pa_array.type, _ArrayXDExtensionType):
-                # don't call to_pylist() to preserve dtype of the fixed-size array
-                zero_copy_only = _is_zero_copy_only(pa_array.type.storage_dtype, unnest=True)
-                if pa_array.type.shape[0] is None:
-                    array: List = pa_array.to_list_of_numpy(zero_copy_only=zero_copy_only)
-                else:
-                    array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only)
+        elif isinstance(pa_array.type, _ArrayXDExtensionType):
+            # don't call to_pylist() to preserve dtype of the fixed-size array
+            zero_copy_only = _is_zero_copy_only(pa_array.type.storage_dtype, unnest=True)
+            if pa_array.type.shape[0] is None:
+                array: List = pa_array.to_list_of_numpy(zero_copy_only=zero_copy_only)
             else:
-                zero_copy_only = _is_zero_copy_only(pa_array.type) and not _is_array_with_nulls(pa_array)
-                array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only).tolist()
-        if len(array) > 0:
-            if any(
-                (isinstance(x, np.ndarray) and (x.dtype == object or x.shape != array[0].shape))
-                or (isinstance(x, float) and np.isnan(x))
-                for x in array
-            ):
-                return np.array(array, copy=False, dtype=object)
+                array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only)
+        else:
+            zero_copy_only = _is_zero_copy_only(pa_array.type) and not _is_array_with_nulls(pa_array)
+            array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only).tolist()
+        if len(array) > 0 and any(
+            (
+                isinstance(x, np.ndarray)
+                and (x.dtype == object or x.shape != array[0].shape)
+            )
+            or (isinstance(x, float) and np.isnan(x))
+            for x in array
+        ):
+            return np.array(array, copy=False, dtype=object)
         return np.array(array, copy=False)
 
 
@@ -497,15 +497,14 @@ class CustomFormatter(Formatter[dict, ColumnFormat, dict]):
 
     def format_column(self, pa_table: pa.Table) -> ColumnFormat:
         formatted_batch = self.format_batch(pa_table)
-        if hasattr(formatted_batch, "keys"):
-            if len(formatted_batch.keys()) > 1:
-                raise TypeError(
-                    "Tried to query a column but the custom formatting function returns too many columns. "
-                    f"Only one column was expected but got columns {list(formatted_batch.keys())}."
-                )
-        else:
+        if not hasattr(formatted_batch, "keys"):
             raise TypeError(
                 f"Custom formatting function must return a dict to be able to pick a row, but got {formatted_batch}"
+            )
+        if len(formatted_batch.keys()) > 1:
+            raise TypeError(
+                "Tried to query a column but the custom formatting function returns too many columns. "
+                f"Only one column was expected but got columns {list(formatted_batch.keys())}."
             )
         try:
             return formatted_batch[pa_table.column_names[0]]
@@ -586,12 +585,11 @@ def query_table(
     else:
         size = indices.num_rows if indices is not None else table.num_rows
         _check_valid_index_key(key, size)
-    # Query the main table
-    if indices is None:
-        pa_subtable = _query_table(table, key)
-    else:
-        pa_subtable = _query_table_with_indices_mapping(table, key, indices=indices)
-    return pa_subtable
+    return (
+        _query_table(table, key)
+        if indices is None
+        else _query_table_with_indices_mapping(table, key, indices=indices)
+    )
 
 
 def format_table(
@@ -624,10 +622,7 @@ def format_table(
         - the TorchFormatter returns a dictionary for a row or a batch, and a torch.Tensor for a column.
         - the TFFormatter returns a dictionary for a row or a batch, and a tf.Tensor for a column.
     """
-    if isinstance(table, Table):
-        pa_table = table.table
-    else:
-        pa_table = table
+    pa_table = table.table if isinstance(table, Table) else table
     query_type = key_to_query_type(key)
     python_formatter = PythonFormatter(features=None)
     if format_columns is None:

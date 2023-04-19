@@ -520,6 +520,8 @@ def mock_fs(file_paths: List[str]):
         {"name": file_path, "type": "file", "size": 10} for file_path in file_paths
     ]
 
+
+
     class DummyTestFS(AbstractFileSystem):
         protocol = "mock"
         _fs_contents = fs_contents
@@ -534,9 +536,8 @@ def mock_fs(file_paths: List[str]):
                 files.sort(key=lambda file: file["name"])
                 self.dircache[path.rstrip("/")] = files
 
-            if detail:
-                return files
-            return [file["name"] for file in files]
+            return files if detail else [file["name"] for file in files]
+
 
     return DummyTestFS()
 

@@ -620,10 +620,16 @@ class QueryTest(TestCase):
         n = pa_table.num_rows
         np_A, np_B, np_C = np.array(_COL_A, dtype=np.int64), np.array(_COL_B), np.array(_COL_C)
         # classical usage
-        subtable = query_table(table, range(0, 1))
+        subtable = query_table(table, range(1))
         self.assertTableEqual(
             subtable,
-            pa.Table.from_pydict({"a": np_A[range(0, 1)], "b": np_B[range(0, 1)], "c": np_C[range(0, 1)].tolist()}),
+            pa.Table.from_pydict(
+                {
+                    "a": np_A[range(1)],
+                    "b": np_B[range(1)],
+                    "c": np_C[range(1)].tolist(),
+                }
+            ),
         )
         subtable = query_table(table, range(1, 2))
         self.assertTableEqual(
@@ -677,8 +683,8 @@ class QueryTest(TestCase):
         # raise an IndexError
         with self.assertRaises(IndexError):
             with self.assertRaises(IndexError):
-                np_A[range(0, n + 1)]
-            query_table(table, range(0, n + 1))
+                np_A[range(n + 1)]
+            query_table(table, range(n + 1))
         with self.assertRaises(IndexError):
             with self.assertRaises(IndexError):
                 np_A[range(-(n + 1), -1)]
@@ -689,7 +695,7 @@ class QueryTest(TestCase):
             query_table(table, range(n, n + 1))
         # with indices
         indices = InMemoryTable(self._create_dummy_arrow_indices())
-        subtable = query_table(table, range(0, 1), indices=indices)
+        subtable = query_table(table, range(1), indices=indices)
         self.assertTableEqual(
             subtable,
             pa.Table.from_pydict({"a": [_COL_A[_INDICES[0]]], "b": [_COL_B[_INDICES[0]]], "c": [_COL_C[_INDICES[0]]]}),

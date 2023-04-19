@@ -251,7 +251,7 @@ class SplitBase(metaclass=abc.ABCMeta):
 # Instances are not documented, so we want datasets.percent to be a class, but to
 # have it be sliceable, we need this metaclass.
 class PercentSliceMeta(type):
-    def __getitem__(cls, slice_value):
+    def __getitem__(self, slice_value):
         if not isinstance(slice_value, slice):
             raise ValueError(f"datasets.percent should only be called with slice, not {slice_value}")
         return slice_value
@@ -522,17 +522,14 @@ class SplitDict(dict):
         self.dataset_name = dataset_name
 
     def __getitem__(self, key: Union[SplitBase, str]):
-        # 1st case: The key exists: `info.splits['train']`
         if str(key) in self:
             return super().__getitem__(str(key))
-        # 2nd case: Uses instructions: `info.splits['train[50%]']`
-        else:
-            instructions = make_file_instructions(
-                name=self.dataset_name,
-                split_infos=self.values(),
-                instruction=key,
-            )
-            return SubSplitInfo(instructions)
+        instructions = make_file_instructions(
+            name=self.dataset_name,
+            split_infos=self.values(),
+            instruction=key,
+        )
+        return SubSplitInfo(instructions)
 
     def __setitem__(self, key: Union[SplitBase, str], value: SplitInfo):
         if key != value.name:

@@ -114,15 +114,12 @@ def test_csv_datasetdict_reader_features(features, csv_path, tmp_path):
 
 @pytest.mark.parametrize("split", [None, NamedSplit("train"), "train", "test"])
 def test_csv_datasetdict_reader_split(split, csv_path, tmp_path):
-    if split:
-        path = {split: csv_path}
-    else:
-        path = {"train": csv_path, "test": csv_path}
+    path = {split: csv_path} if split else {"train": csv_path, "test": csv_path}
     cache_dir = tmp_path / "cache"
     expected_features = {"col_1": "int64", "col_2": "int64", "col_3": "float64"}
     dataset = CsvDatasetReader(path, cache_dir=cache_dir).read()
     _check_csv_datasetdict(dataset, expected_features, splits=list(path.keys()))
-    assert all(dataset[split].split == split for split in path.keys())
+    assert all(dataset[split].split == split for split in path)
 
 
 def iter_csv_file(csv_path):

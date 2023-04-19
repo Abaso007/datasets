@@ -30,9 +30,9 @@ def format_json_to_md(input_json_file, output_md_file):
             if dif_val is not None:
                 val_str += f" ({dif_val:f})" if isinstance(dif_val, (int, float)) else "None"
 
-            title += " " + metric_name + " |"
+            title += f" {metric_name} |"
             lines += "---|"
-            value += val_str + " |"
+            value += f"{val_str} |"
 
         output_md += [title, lines, value, " "]
 

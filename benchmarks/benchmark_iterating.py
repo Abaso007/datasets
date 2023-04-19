@@ -78,17 +78,20 @@ def benchmark_iterating():
         )
         print("first set of iterations")
         for func, kwargs in functions:
-            print(func.__name__, str(kwargs))
-            times[func.__name__ + " " + " ".join(str(v) for v in kwargs.values())] = func(dataset, **kwargs)
+            print(func.__name__, kwargs)
+            times[
+                f"{func.__name__} " + " ".join(str(v) for v in kwargs.values())
+            ] = func(dataset, **kwargs)
 
         print("shuffling dataset")
         dataset = dataset.shuffle()
         print("Second set of iterations (after shuffling")
         for func, kwargs in functions_shuffled:
-            print("shuffled ", func.__name__, str(kwargs))
-            times["shuffled " + func.__name__ + " " + " ".join(str(v) for v in kwargs.values())] = func(
-                dataset, **kwargs
-            )
+            print("shuffled ", func.__name__, kwargs)
+            times[
+                f"shuffled {func.__name__} "
+                + " ".join(str(v) for v in kwargs.values())
+            ] = func(dataset, **kwargs)
 
     with open(RESULTS_FILE_PATH, "wb") as f:
         f.write(json.dumps(times).encode("utf-8"))

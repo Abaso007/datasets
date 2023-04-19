@@ -3,17 +3,7 @@ import pytest
 from datasets.utils.sharding import _distribute_shards, _number_of_shards_in_gen_kwargs, _split_gen_kwargs
 
 
-@pytest.mark.parametrize(
-    "kwargs, expected",
-    [
-        ({"num_shards": 0, "max_num_jobs": 1}, []),
-        ({"num_shards": 10, "max_num_jobs": 1}, [range(10)]),
-        ({"num_shards": 10, "max_num_jobs": 10}, [range(i, i + 1) for i in range(10)]),
-        ({"num_shards": 1, "max_num_jobs": 10}, [range(1)]),
-        ({"num_shards": 10, "max_num_jobs": 3}, [range(0, 4), range(4, 7), range(7, 10)]),
-        ({"num_shards": 3, "max_num_jobs": 10}, [range(0, 1), range(1, 2), range(2, 3)]),
-    ],
-)
+@pytest.mark.parametrize("kwargs, expected", [({"num_shards": 0, "max_num_jobs": 1}, []), ({"num_shards": 10, "max_num_jobs": 1}, [range(10)]), ({"num_shards": 10, "max_num_jobs": 10}, [range(i, i + 1) for i in range(10)]), ({"num_shards": 1, "max_num_jobs": 10}, [range(1)]), ({"num_shards": 10, "max_num_jobs": 3}, [range(4), range(4, 7), range(7, 10)]), ({"num_shards": 3, "max_num_jobs": 10}, [range(1), range(1, 2), range(2, 3)])])
 def test_distribute_shards(kwargs, expected):
     out = _distribute_shards(**kwargs)
     assert out == expected

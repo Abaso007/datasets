@@ -144,9 +144,9 @@ class TestCommand(BaseDatasetsCLICommand):
                 os.path.join(builder.get_imported_module_dir(), datasets.config.DATASETDICT_INFOS_FILENAME)
             )  # record checksums only if we need to update a (deprecated) dataset_infos.json
             builder.download_and_prepare(
-                download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS
-                if not self._force_redownload
-                else DownloadMode.FORCE_REDOWNLOAD,
+                download_mode=DownloadMode.FORCE_REDOWNLOAD
+                if self._force_redownload
+                else DownloadMode.REUSE_CACHE_IF_EXISTS,
                 verification_mode=VerificationMode.NO_CHECKS
                 if self._ignore_verifications
                 else VerificationMode.ALL_CHECKS,
@@ -163,7 +163,7 @@ class TestCommand(BaseDatasetsCLICommand):
             # upload them on S3 at the same time afterwards.
             if self._save_infos:
                 dataset_readme_path = os.path.join(builder_cls.get_imported_module_dir(), "README.md")
-                name = Path(path).name + ".py"
+                name = f"{Path(path).name}.py"
                 combined_path = os.path.join(path, name)
                 if os.path.isfile(path):
                     dataset_dir = os.path.dirname(path)

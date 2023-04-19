@@ -139,17 +139,17 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
     if datasets_dtype in pa.__dict__:
         return pa.__dict__[datasets_dtype]()
 
-    if (datasets_dtype + "_") in pa.__dict__:
-        return pa.__dict__[datasets_dtype + "_"]()
+    if f"{datasets_dtype}_" in pa.__dict__:
+        return pa.__dict__[f"{datasets_dtype}_"]()
 
     timestamp_matches = re.search(r"^timestamp\[(.*)\]$", datasets_dtype)
     if timestamp_matches:
-        timestamp_internals = timestamp_matches.group(1)
+        timestamp_internals = timestamp_matches[1]
         internals_matches = re.search(r"^(s|ms|us|ns),\s*tz=([a-zA-Z0-9/_+\-:]*)$", timestamp_internals)
         if timestamp_internals in ["s", "ms", "us", "ns"]:
             return pa.timestamp(timestamp_internals)
         elif internals_matches:
-            return pa.timestamp(internals_matches.group(1), internals_matches.group(2))
+            return pa.timestamp(internals_matches[1], internals_matches[2])
         else:
             raise ValueError(
                 _dtype_error_msg(
@@ -162,7 +162,7 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
 
     duration_matches = re.search(r"^duration\[(.*)\]$", datasets_dtype)
     if duration_matches:
-        duration_internals = duration_matches.group(1)
+        duration_internals = duration_matches[1]
         if duration_internals in ["s", "ms", "us", "ns"]:
             return pa.duration(duration_internals)
         else:
@@ -177,9 +177,9 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
 
     time_matches = re.search(r"^time(.*)\[(.*)\]$", datasets_dtype)
     if time_matches:
-        time_internals_bits = time_matches.group(1)
+        time_internals_bits = time_matches[1]
         if time_internals_bits == "32":
-            time_internals_unit = time_matches.group(2)
+            time_internals_unit = time_matches[2]
             if time_internals_unit in ["s", "ms"]:
                 return pa.time32(time_internals_unit)
             else:
@@ -187,7 +187,7 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
                     f"{time_internals_unit} is not a valid unit for the pyarrow time32 type. Supported units: s (second) and ms (millisecond)."
                 )
         elif time_internals_bits == "64":
-            time_internals_unit = time_matches.group(2)
+            time_internals_unit = time_matches[2]
             if time_internals_unit in ["us", "ns"]:
                 return pa.time64(time_internals_unit)
             else:
@@ -209,12 +209,14 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
 
     decimal_matches = re.search(r"^decimal(.*)\((.*)\)$", datasets_dtype)
     if decimal_matches:
-        decimal_internals_bits = decimal_matches.group(1)
+        decimal_internals_bits = decimal_matches[1]
         if decimal_internals_bits == "128":
-            decimal_internals_precision_and_scale = re.search(r"^(\d+),\s*(-?\d+)$", decimal_matches.group(2))
+            decimal_internals_precision_and_scale = re.search(
+                r"^(\d+),\s*(-?\d+)$", decimal_matches[2]
+            )
             if decimal_internals_precision_and_scale:
-                precision = decimal_internals_precision_and_scale.group(1)
-                scale = decimal_internals_precision_and_scale.group(2)
+                precision = decimal_internals_precision_and_scale[1]
+                scale = decimal_internals_precision_and_scale[2]
                 return pa.decimal128(int(precision), int(scale))
             else:
                 raise ValueError(
@@ -226,10 +228,12 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
                     )
                 )
         elif decimal_internals_bits == "256":
-            decimal_internals_precision_and_scale = re.search(r"^(\d+),\s*(-?\d+)$", decimal_matches.group(2))
+            decimal_internals_precision_and_scale = re.search(
+                r"^(\d+),\s*(-?\d+)$", decimal_matches[2]
+            )
             if decimal_internals_precision_and_scale:
-                precision = decimal_internals_precision_and_scale.group(1)
-                scale = decimal_internals_precision_and_scale.group(2)
+                precision = decimal_internals_precision_and_scale[1]
+                scale = decimal_internals_precision_and_scale[2]
                 return pa.decimal256(int(precision), int(scale))
             else:
                 raise ValueError(
@@ -254,9 +258,7 @@ def string_to_arrow(datasets_dtype: str) -> pa.DataType:
             )
 
     raise ValueError(
-        f"Neither {datasets_dtype} nor {datasets_dtype + '_'} seems to be a pyarrow data type. "
-        f"Please make sure to use a correct data type, see: "
-        f"https://arrow.apache.org/docs/python/api/datatypes.html#factory-functions"
+        f"Neither {datasets_dtype} nor {datasets_dtype}_ seems to be a pyarrow data type. Please make sure to use a correct data type, see: https://arrow.apache.org/docs/python/api/datatypes.html#factory-functions"
     )
 
 
@@ -388,30 +390,26 @@ def _cast_to_python_objects(obj: Any, only_1d_for_numpy: bool, optimize_list_cas
             output[k] = casted_v
         return output if has_changed else obj, has_changed
     elif isinstance(obj, (list, tuple)):
-        if len(obj) > 0:
-            for first_elmt in obj:
-                if _check_non_null_non_empty_recursive(first_elmt):
-                    break
-            casted_first_elmt, has_changed_first_elmt = _cast_to_python_objects(
-                first_elmt, only_1d_for_numpy=only_1d_for_numpy, optimize_list_casting=optimize_list_casting
-            )
-            if has_changed_first_elmt or not optimize_list_casting:
-                return (
-                    [
-                        _cast_to_python_objects(
-                            elmt, only_1d_for_numpy=only_1d_for_numpy, optimize_list_casting=optimize_list_casting
-                        )[0]
-                        for elmt in obj
-                    ],
-                    True,
-                )
-            else:
-                if isinstance(obj, (list, tuple)):
-                    return obj, False
-                else:
-                    return list(obj), True
-        else:
+        if len(obj) <= 0:
             return obj, False
+        for first_elmt in obj:
+            if _check_non_null_non_empty_recursive(first_elmt):
+                break
+        casted_first_elmt, has_changed_first_elmt = _cast_to_python_objects(
+            first_elmt, only_1d_for_numpy=only_1d_for_numpy, optimize_list_casting=optimize_list_casting
+        )
+        if has_changed_first_elmt or not optimize_list_casting:
+            return (
+                [
+                    _cast_to_python_objects(
+                        elmt, only_1d_for_numpy=only_1d_for_numpy, optimize_list_casting=optimize_list_casting
+                    )[0]
+                    for elmt in obj
+                ],
+                True,
+            )
+        else:
+            return (obj, False) if isinstance(obj, (list, tuple)) else (list(obj), True)
     else:
         return obj, False
 
@@ -517,8 +515,9 @@ class _ArrayXD:
         self.shape = tuple(self.shape)
 
     def __call__(self):
-        pa_type = globals()[self.__class__.__name__ + "ExtensionType"](self.shape, self.dtype)
-        return pa_type
+        return globals()[self.__class__.__name__ + "ExtensionType"](
+            self.shape, self.dtype
+        )
 
     def encode_example(self, value):
         if isinstance(value, np.ndarray):
@@ -653,10 +652,8 @@ class _ArrayXDExtensionType(pa.PyExtensionType):
 
     def _generate_dtype(self, dtype):
         dtype = string_to_arrow(dtype)
-        for d in reversed(self.shape):
+        for _ in reversed(self.shape):
             dtype = pa.list_(dtype)
-            # Don't specify the size of the list, since fixed length list arrays have issues
-            # being validated after slicing in pyarrow 0.17.1
         return dtype
 
     def to_pandas_dtype(self):
@@ -698,7 +695,11 @@ def _is_zero_copy_only(pa_type: pa.DataType, unnest: bool = False) -> bool:
 
     if unnest:
         pa_type = _unnest_pa_type(pa_type)
-    return pa.types.is_primitive(pa_type) and not (pa.types.is_boolean(pa_type) or pa.types.is_temporal(pa_type))
+    return (
+        pa.types.is_primitive(pa_type)
+        and not pa.types.is_boolean(pa_type)
+        and not pa.types.is_temporal(pa_type)
+    )
 
 
 class ArrayExtensionArray(pa.ExtensionArray):
@@ -802,7 +803,7 @@ class PandasArrayExtensionDtype(PandasExtensionDtype):
 
 class PandasArrayExtensionArray(PandasExtensionArray):
     def __init__(self, data: np.ndarray, copy: bool = False):
-        self._data = data if not copy else np.array(data)
+        self._data = np.array(data) if copy else data
         self._dtype = PandasArrayExtensionDtype(data.dtype)
 
     def __array__(self, dtype=None):
@@ -820,10 +821,7 @@ class PandasArrayExtensionArray(PandasExtensionArray):
             for i in range(len(self._data)):
                 out[i] = self._data[i]
             return out
-        if dtype is None:
-            return self._data
-        else:
-            return self._data.astype(dtype)
+        return self._data if dtype is None else self._data.astype(dtype)
 
     def copy(self, deep: bool = False) -> "PandasArrayExtensionArray":
         return PandasArrayExtensionArray(self._data, copy=True)
@@ -997,21 +995,21 @@ class ClassLabel:
 
     def _strval2int(self, value: str) -> int:
         failed_parse = False
-        value = str(value)
+        value = value
         # first attempt - raw string value
         int_value = self._str2int.get(value)
         if int_value is None:
             # second attempt - strip whitespace
             int_value = self._str2int.get(value.strip())
-            if int_value is None:
-                # third attempt - convert str to int
-                try:
-                    int_value = int(value)
-                except ValueError:
+        if int_value is None:
+            # third attempt - convert str to int
+            try:
+                int_value = int(value)
+            except ValueError:
+                failed_parse = True
+            else:
+                if int_value < -1 or int_value >= self.num_classes:
                     failed_parse = True
-                else:
-                    if int_value < -1 or int_value >= self.num_classes:
-                        failed_parse = True
         if failed_parse:
             raise ValueError(f"Invalid string class label {value}")
         return int_value
@@ -1150,16 +1148,15 @@ def _check_non_null_non_empty_recursive(obj, schema: Optional[FeatureType] = Non
     if obj is None:
         return False
     elif isinstance(obj, (list, tuple)) and (schema is None or isinstance(schema, (list, tuple, Sequence))):
-        if len(obj) > 0:
-            if schema is None:
-                pass
-            elif isinstance(schema, (list, tuple)):
-                schema = schema[0]
-            else:
-                schema = schema.feature
-            return _check_non_null_non_empty_recursive(obj[0], schema)
-        else:
+        if len(obj) <= 0:
             return False
+        if schema is None:
+            pass
+        elif isinstance(schema, (list, tuple)):
+            schema = schema[0]
+        else:
+            schema = schema.feature
+        return _check_non_null_non_empty_recursive(obj[0], schema)
     else:
         return True
 
@@ -1173,14 +1170,10 @@ def get_nested_type(schema: FeatureType) -> pa.DataType:
         datasets.Feature->pa.struct
     """
     # Nested structures: we allow dict, list/tuples, sequences
-    if isinstance(schema, Features):
+    if isinstance(schema, (Features, dict)):
         return pa.struct(
             {key: get_nested_type(schema[key]) for key in schema}
         )  # Features is subclass of dict, and dict order is deterministic since Python 3.6
-    elif isinstance(schema, dict):
-        return pa.struct(
-            {key: get_nested_type(schema[key]) for key in schema}
-        )  # however don't sort on struct types since the order matters
     elif isinstance(schema, (list, tuple)):
         if len(schema) != 1:
             raise ValueError("When defining list feature, you should just provide one example of the inner type")
@@ -1218,17 +1211,16 @@ def encode_nested_example(schema, obj, level=0):
         )
 
     elif isinstance(schema, (list, tuple)):
-        sub_schema = schema[0]
         if obj is None:
             return None
-        else:
-            if len(obj) > 0:
-                for first_elmt in obj:
-                    if _check_non_null_non_empty_recursive(first_elmt, sub_schema):
-                        break
-                if encode_nested_example(sub_schema, first_elmt, level=level + 1) != first_elmt:
-                    return [encode_nested_example(sub_schema, o, level=level + 1) for o in obj]
-            return list(obj)
+        sub_schema = schema[0]
+        if len(obj) > 0:
+            for first_elmt in obj:
+                if _check_non_null_non_empty_recursive(first_elmt, sub_schema):
+                    break
+            if encode_nested_example(sub_schema, first_elmt, level=level + 1) != first_elmt:
+                return [encode_nested_example(sub_schema, o, level=level + 1) for o in obj]
+        return list(obj)
     elif isinstance(schema, Sequence):
         if obj is None:
             return None
@@ -1240,29 +1232,24 @@ def encode_nested_example(schema, obj, level=0):
                 # obj is a list of dict
                 for k, dict_tuples in zip_dict(schema.feature, *obj):
                     list_dict[k] = [encode_nested_example(dict_tuples[0], o, level=level + 1) for o in dict_tuples[1:]]
-                return list_dict
             else:
                 # obj is a single dict
                 for k, (sub_schema, sub_objs) in zip_dict(schema.feature, obj):
                     list_dict[k] = [encode_nested_example(sub_schema, o, level=level + 1) for o in sub_objs]
-                return list_dict
-        # schema.feature is not a dict
-        if isinstance(obj, str):  # don't interpret a string as a list
+            return list_dict
+        if isinstance(obj, str):
             raise ValueError(f"Got a string but expected a list instead: '{obj}'")
-        else:
-            if len(obj) > 0:
-                for first_elmt in obj:
-                    if _check_non_null_non_empty_recursive(first_elmt, schema.feature):
-                        break
-                # be careful when comparing tensors here
-                if (
-                    not isinstance(first_elmt, list)
-                    or encode_nested_example(schema.feature, first_elmt, level=level + 1) != first_elmt
-                ):
-                    return [encode_nested_example(schema.feature, o, level=level + 1) for o in obj]
-            return list(obj)
-    # Object with special encoding:
-    # ClassLabel will convert from string to int, TranslationVariableLanguages does some checks
+        if len(obj) > 0:
+            for first_elmt in obj:
+                if _check_non_null_non_empty_recursive(first_elmt, schema.feature):
+                    break
+            # be careful when comparing tensors here
+            if (
+                not isinstance(first_elmt, list)
+                or encode_nested_example(schema.feature, first_elmt, level=level + 1) != first_elmt
+            ):
+                return [encode_nested_example(schema.feature, o, level=level + 1) for o in obj]
+        return list(obj)
     elif isinstance(schema, (Audio, Image, ClassLabel, TranslationVariableLanguages, Value, _ArrayXD)):
         return schema.encode_example(obj) if obj is not None else None
     # Other object should be directly convertible to a native Arrow type (like Translation and Translation)
@@ -1284,24 +1271,22 @@ def decode_nested_example(schema, obj, token_per_repo_id: Optional[Dict[str, Uni
             else None
         )
     elif isinstance(schema, (list, tuple)):
-        sub_schema = schema[0]
         if obj is None:
             return None
-        else:
-            if len(obj) > 0:
-                for first_elmt in obj:
-                    if _check_non_null_non_empty_recursive(first_elmt, sub_schema):
-                        break
-                if decode_nested_example(sub_schema, first_elmt) != first_elmt:
-                    return [decode_nested_example(sub_schema, o) for o in obj]
-            return list(obj)
+        sub_schema = schema[0]
+        if len(obj) > 0:
+            for first_elmt in obj:
+                if _check_non_null_non_empty_recursive(first_elmt, sub_schema):
+                    break
+            if decode_nested_example(sub_schema, first_elmt) != first_elmt:
+                return [decode_nested_example(sub_schema, o) for o in obj]
+        return list(obj)
     elif isinstance(schema, Sequence):
         # We allow to reverse list of dict => dict of list for compatiblity with tfds
         if isinstance(schema.feature, dict):
             return {k: decode_nested_example([schema.feature[k]], obj[k]) for k in schema.feature}
         else:
             return decode_nested_example([schema.feature], obj)
-    # Object with special decoding:
     elif isinstance(schema, (Audio, Image)):
         # we pass the token to read and decode files from private repositories in streaming mode
         if obj is not None and schema.decode:
@@ -1391,7 +1376,7 @@ def list_of_pa_arrays_to_pyarrow_listarray(l_arr: List[Optional[pa.Array]]) -> p
 
 def list_of_np_array_to_pyarrow_listarray(l_arr: List[np.ndarray], type: pa.DataType = None) -> pa.ListArray:
     """Build a PyArrow ListArray from a possibly nested list of NumPy arrays"""
-    if len(l_arr) > 0:
+    if l_arr:
         return list_of_pa_arrays_to_pyarrow_listarray(
             [numpy_to_pyarrow_listarray(arr, type=type) if arr is not None else None for arr in l_arr]
         )
@@ -1465,7 +1450,9 @@ def require_decoding(feature: FeatureType, ignore_decode_attribute: bool = False
     elif isinstance(feature, Sequence):
         return require_decoding(feature.feature)
     else:
-        return hasattr(feature, "decode_example") and (feature.decode if not ignore_decode_attribute else True)
+        return hasattr(feature, "decode_example") and (
+            True if ignore_decode_attribute else feature.decode
+        )
 
 
 def require_storage_cast(feature: FeatureType) -> bool:
@@ -1901,11 +1888,14 @@ class Features(dict):
         Returns:
             `dict[str, list[Any]]`
         """
-        decoded_batch = {}
-        for column_name, column in batch.items():
-            decoded_batch[column_name] = (
+        return {
+            column_name: (
                 [
-                    decode_nested_example(self[column_name], value, token_per_repo_id=token_per_repo_id)
+                    decode_nested_example(
+                        self[column_name],
+                        value,
+                        token_per_repo_id=token_per_repo_id,
+                    )
                     if value is not None
                     else None
                     for value in column
@@ -1913,7 +1903,8 @@ class Features(dict):
                 if self._column_requires_decoding[column_name]
                 else column
             )
-        return decoded_batch
+            for column_name, column in batch.items()
+        }
 
     def copy(self) -> "Features":
         """
@@ -2028,7 +2019,7 @@ class Features(dict):
          'title': Value(dtype='string', id=None)}
         ```
         """
-        for depth in range(1, max_depth):
+        for _ in range(1, max_depth):
             no_change = True
             flattened = self.copy()
             for column_name, subfeature in self.items():
@@ -2040,7 +2031,9 @@ class Features(dict):
                     no_change = False
                     flattened.update(
                         {
-                            f"{column_name}.{k}": Sequence(v) if not isinstance(v, dict) else [v]
+                            f"{column_name}.{k}": [v]
+                            if isinstance(v, dict)
+                            else Sequence(v)
                             for k, v in subfeature.feature.items()
                         }
                     )

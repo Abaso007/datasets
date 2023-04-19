@@ -117,4 +117,4 @@ def test_datasetdict_from_text_split(split, text_path, tmp_path):
     expected_features = {"text": "string"}
     dataset = TextDatasetReader(path, cache_dir=cache_dir).read()
     _check_text_datasetdict(dataset, expected_features, splits=list(path.keys()))
-    assert all(dataset[split].split == split for split in path.keys())
+    assert all(dataset[split].split == split for split in path)

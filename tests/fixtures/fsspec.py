@@ -13,7 +13,7 @@ class MockFileSystem(AbstractFileSystem):
     def __init__(self, *args, local_root_dir, **kwargs):
         super().__init__()
         self._fs = LocalFileSystem(*args, **kwargs)
-        self.local_root_dir = Path(local_root_dir).resolve().as_posix() + "/"
+        self.local_root_dir = f"{Path(local_root_dir).resolve().as_posix()}/"
 
     def mkdir(self, path, *args, **kwargs):
         path = posixpath.join(self.local_root_dir, self._strip_protocol(path))

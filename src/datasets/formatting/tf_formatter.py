@@ -74,9 +74,8 @@ class TFFormatter(Formatter[Mapping, "tf.Tensor", Mapping]):
 
     def _recursive_tensorize(self, data_struct: dict):
         # support for nested types like struct of list of struct
-        if isinstance(data_struct, np.ndarray):
-            if data_struct.dtype == object:  # tf tensors cannot be instantied from an array of objects
-                return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
+        if isinstance(data_struct, np.ndarray) and data_struct.dtype == object:
+            return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
         return self._tensorize(data_struct)
 
     def recursive_tensorize(self, data_struct: dict):

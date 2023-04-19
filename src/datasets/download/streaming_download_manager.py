@@ -104,9 +104,8 @@ def xjoin(a, *p):
     a, *b = str(a).split("::")
     if is_local_path(a):
         return os.path.join(a, *p)
-    else:
-        a = posixpath.join(a, *p)
-        return "::".join([a] + b)
+    a = posixpath.join(a, *p)
+    return "::".join([a] + b)
 
 
 def xdirname(a):
@@ -155,19 +154,18 @@ def xexists(urlpath: str, use_auth_token: Optional[Union[str, bool]] = None):
     main_hop, *rest_hops = _as_str(urlpath).split("::")
     if is_local_path(main_hop):
         return os.path.exists(main_hop)
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
+        storage_options = http_kwargs
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": http_kwargs}
+        urlpath = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
-            storage_options = http_kwargs
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": http_kwargs}
-            urlpath = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(urlpath, storage_options=storage_options)
-        return fs.exists(main_hop)
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(urlpath, storage_options=storage_options)
+    return fs.exists(main_hop)
 
 
 def xbasename(a):
@@ -218,9 +216,8 @@ def xsplit(a):
     a, *b = str(a).split("::")
     if is_local_path(a):
         return os.path.split(Path(a).as_posix())
-    else:
-        a, tail = posixpath.split(a)
-        return "::".join([a + "//" if a.endswith(":") else a] + b), tail
+    a, tail = posixpath.split(a)
+    return "::".join([f"{a}//" if a.endswith(":") else a] + b), tail
 
 
 def xsplitext(a):
@@ -245,9 +242,8 @@ def xsplitext(a):
     a, *b = str(a).split("::")
     if is_local_path(a):
         return os.path.splitext(Path(a).as_posix())
-    else:
-        a, ext = posixpath.splitext(a)
-        return "::".join([a] + b), ext
+    a, ext = posixpath.splitext(a)
+    return "::".join([a] + b), ext
 
 
 def xisfile(path, use_auth_token: Optional[Union[str, bool]] = None) -> bool:
@@ -264,19 +260,18 @@ def xisfile(path, use_auth_token: Optional[Union[str, bool]] = None) -> bool:
     main_hop, *rest_hops = str(path).split("::")
     if is_local_path(main_hop):
         return os.path.isfile(path)
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
+        storage_options = http_kwargs
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": http_kwargs}
+        path = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
-            storage_options = http_kwargs
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": http_kwargs}
-            path = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
-        return fs.isfile(main_hop)
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
+    return fs.isfile(main_hop)
 
 
 def xgetsize(path, use_auth_token: Optional[Union[str, bool]] = None) -> int:
@@ -293,24 +288,23 @@ def xgetsize(path, use_auth_token: Optional[Union[str, bool]] = None) -> int:
     main_hop, *rest_hops = str(path).split("::")
     if is_local_path(main_hop):
         return os.path.getsize(path)
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
+        storage_options = http_kwargs
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": http_kwargs}
+        path = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            main_hop, http_kwargs = _prepare_http_url_kwargs(main_hop, use_auth_token=use_auth_token)
-            storage_options = http_kwargs
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": http_kwargs}
-            path = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
-        size = fs.size(main_hop)
-        if size is None:
-            # use xopen instead of fs.open to make data fetching more robust
-            with xopen(path, use_auth_token=use_auth_token) as f:
-                size = len(f.read())
-        return size
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
+    size = fs.size(main_hop)
+    if size is None:
+        # use xopen instead of fs.open to make data fetching more robust
+        with xopen(path, use_auth_token=use_auth_token) as f:
+            size = len(f.read())
+    return size
 
 
 def xisdir(path, use_auth_token: Optional[Union[str, bool]] = None) -> bool:
@@ -327,21 +321,18 @@ def xisdir(path, use_auth_token: Optional[Union[str, bool]] = None) -> bool:
     main_hop, *rest_hops = str(path).split("::")
     if is_local_path(main_hop):
         return os.path.isdir(path)
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        raise NotImplementedError("os.path.isdir is not extended to support URLs in streaming mode")
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": http_kwargs}
+        path = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            raise NotImplementedError("os.path.isdir is not extended to support URLs in streaming mode")
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": http_kwargs}
-            path = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
-        inner_path = main_hop.split("://")[1]
-        if not inner_path.strip("/"):
-            return True
-        return fs.isdir(inner_path)
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
+    inner_path = main_hop.split("://")[1]
+    return fs.isdir(inner_path) if inner_path.strip("/") else True
 
 
 def xrelpath(path, start=None):
@@ -414,7 +405,7 @@ def _get_extraction_protocol_with_magic_number(f) -> Optional[str]:
 
 def _get_extraction_protocol(urlpath: str, use_auth_token: Optional[Union[str, bool]] = None) -> Optional[str]:
     # get inner file: zip://train-00000.json.gz::https://foo.bar/data.zip -> zip://train-00000.json.gz
-    urlpath = str(urlpath)
+    urlpath = urlpath
     path = urlpath.split("::")[0]
     extension = _get_path_extension(path)
     if (
@@ -449,7 +440,7 @@ def _prepare_http_url_kwargs(url: str, use_auth_token: Optional[Union[str, bool]
         cookies = None
         for k, v in response.cookies.items():
             if k.startswith("download_warning"):
-                url += "&confirm=" + v
+                url += f"&confirm={v}"
                 cookies = response.cookies
                 kwargs["cookies"] = cookies
     # Fix Google Drive URL to avoid Virus scan warning
@@ -522,23 +513,22 @@ def xlistdir(path: str, use_auth_token: Optional[Union[str, bool]] = None) -> Li
     main_hop, *rest_hops = _as_str(path).split("::")
     if is_local_path(main_hop):
         return os.listdir(path)
+    # globbing inside a zip in a private repo requires authentication
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        raise NotImplementedError("os.listdir is not extended to support URLs in streaming mode")
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": http_kwargs}
+        path = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        # globbing inside a zip in a private repo requires authentication
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            raise NotImplementedError("os.listdir is not extended to support URLs in streaming mode")
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, http_kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": http_kwargs}
-            path = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
-        inner_path = main_hop.split("://")[1]
-        if inner_path.strip("/") and not fs.isdir(inner_path):
-            raise FileNotFoundError(f"Directory doesn't exist: {path}")
-        objects = fs.listdir(inner_path)
-        return [os.path.basename(obj["name"]) for obj in objects]
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(path, storage_options=storage_options)
+    inner_path = main_hop.split("://")[1]
+    if inner_path.strip("/") and not fs.isdir(inner_path):
+        raise FileNotFoundError(f"Directory doesn't exist: {path}")
+    objects = fs.listdir(inner_path)
+    return [os.path.basename(obj["name"]) for obj in objects]
 
 
 def xglob(urlpath, *, recursive=False, use_auth_token: Optional[Union[str, bool]] = None):
@@ -557,26 +547,25 @@ def xglob(urlpath, *, recursive=False, use_auth_token: Optional[Union[str, bool]
     main_hop, *rest_hops = _as_str(urlpath).split("::")
     if is_local_path(main_hop):
         return glob.glob(main_hop, recursive=recursive)
+    # globbing inside a zip in a private repo requires authentication
+    if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
+        raise NotImplementedError("glob.glob is not extended to support URLs in streaming mode")
+    elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
+        url = rest_hops[0]
+        url, kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
+        storage_options = {"https": kwargs}
+        urlpath = "::".join([main_hop, url, *rest_hops[1:]])
     else:
-        # globbing inside a zip in a private repo requires authentication
-        if not rest_hops and (main_hop.startswith("http://") or main_hop.startswith("https://")):
-            raise NotImplementedError("glob.glob is not extended to support URLs in streaming mode")
-        elif rest_hops and (rest_hops[0].startswith("http://") or rest_hops[0].startswith("https://")):
-            url = rest_hops[0]
-            url, kwargs = _prepare_http_url_kwargs(url, use_auth_token=use_auth_token)
-            storage_options = {"https": kwargs}
-            urlpath = "::".join([main_hop, url, *rest_hops[1:]])
-        else:
-            storage_options = None
-        fs, *_ = fsspec.get_fs_token_paths(urlpath, storage_options=storage_options)
-        # - If there's no "*" in the pattern, get_fs_token_paths() doesn't do any pattern matching
-        #   so to be able to glob patterns like "[0-9]", we have to call `fs.glob`.
-        # - Also "*" in get_fs_token_paths() only matches files: we have to call `fs.glob` to match directories.
-        # - If there is "**" in the pattern, `fs.glob` must be called anyway.
-        inner_path = main_hop.split("://")[1]
-        globbed_paths = fs.glob(inner_path)
-        protocol = fs.protocol if isinstance(fs.protocol, str) else fs.protocol[-1]
-        return ["::".join([f"{protocol}://{globbed_path}"] + rest_hops) for globbed_path in globbed_paths]
+        storage_options = None
+    fs, *_ = fsspec.get_fs_token_paths(urlpath, storage_options=storage_options)
+    # - If there's no "*" in the pattern, get_fs_token_paths() doesn't do any pattern matching
+    #   so to be able to glob patterns like "[0-9]", we have to call `fs.glob`.
+    # - Also "*" in get_fs_token_paths() only matches files: we have to call `fs.glob` to match directories.
+    # - If there is "**" in the pattern, `fs.glob` must be called anyway.
+    inner_path = main_hop.split("://")[1]
+    globbed_paths = fs.glob(inner_path)
+    protocol = fs.protocol if isinstance(fs.protocol, str) else fs.protocol[-1]
+    return ["::".join([f"{protocol}://{globbed_path}"] + rest_hops) for globbed_path in globbed_paths]
 
 
 def xwalk(urlpath, use_auth_token: Optional[Union[str, bool]] = None, **kwargs):
@@ -682,7 +671,7 @@ class xPath(type(Path())):
         Yields:
             [`xPath`]
         """
-        return self.glob("**/" + pattern, **kwargs)
+        return self.glob(f"**/{pattern}", **kwargs)
 
     @property
     def parent(self) -> "xPath":
@@ -762,9 +751,8 @@ def xgzip_open(filepath_or_buffer, *args, use_auth_token: Optional[Union[str, bo
 
     if hasattr(filepath_or_buffer, "read"):
         return gzip.open(filepath_or_buffer, *args, **kwargs)
-    else:
-        filepath_or_buffer = str(filepath_or_buffer)
-        return gzip.open(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), *args, **kwargs)
+    filepath_or_buffer = str(filepath_or_buffer)
+    return gzip.open(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), *args, **kwargs)
 
 
 def xnumpy_load(filepath_or_buffer, *args, use_auth_token: Optional[Union[str, bool]] = None, **kwargs):
@@ -772,9 +760,8 @@ def xnumpy_load(filepath_or_buffer, *args, use_auth_token: Optional[Union[str, b
 
     if hasattr(filepath_or_buffer, "read"):
         return np.load(filepath_or_buffer, *args, **kwargs)
-    else:
-        filepath_or_buffer = str(filepath_or_buffer)
-        return np.load(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), *args, **kwargs)
+    filepath_or_buffer = str(filepath_or_buffer)
+    return np.load(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), *args, **kwargs)
 
 
 def xpandas_read_csv(filepath_or_buffer, use_auth_token: Optional[Union[str, bool]] = None, **kwargs):
@@ -782,11 +769,10 @@ def xpandas_read_csv(filepath_or_buffer, use_auth_token: Optional[Union[str, boo
 
     if hasattr(filepath_or_buffer, "read"):
         return pd.read_csv(filepath_or_buffer, **kwargs)
-    else:
-        filepath_or_buffer = str(filepath_or_buffer)
-        if kwargs.get("compression", "infer") == "infer":
-            kwargs["compression"] = _get_extraction_protocol(filepath_or_buffer, use_auth_token=use_auth_token)
-        return pd.read_csv(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), **kwargs)
+    filepath_or_buffer = str(filepath_or_buffer)
+    if kwargs.get("compression", "infer") == "infer":
+        kwargs["compression"] = _get_extraction_protocol(filepath_or_buffer, use_auth_token=use_auth_token)
+    return pd.read_csv(xopen(filepath_or_buffer, "rb", use_auth_token=use_auth_token), **kwargs)
 
 
 def xpandas_read_excel(filepath_or_buffer, use_auth_token: Optional[Union[str, bool]] = None, **kwargs):
@@ -830,9 +816,8 @@ def xet_parse(source, parser=None, use_auth_token: Optional[Union[str, bool]] = 
     """
     if hasattr(source, "read"):
         return ET.parse(source, parser=parser)
-    else:
-        with xopen(source, "rb", use_auth_token=use_auth_token) as f:
-            return ET.parse(f, parser=parser)
+    with xopen(source, "rb", use_auth_token=use_auth_token) as f:
+        return ET.parse(f, parser=parser)
 
 
 def xxml_dom_minidom_parse(filename_or_file, use_auth_token: Optional[Union[str, bool]] = None, **kwargs):
@@ -849,9 +834,8 @@ def xxml_dom_minidom_parse(filename_or_file, use_auth_token: Optional[Union[str,
     """
     if hasattr(filename_or_file, "read"):
         return xml.dom.minidom.parse(filename_or_file, **kwargs)
-    else:
-        with xopen(filename_or_file, "rb", use_auth_token=use_auth_token) as f:
-            return xml.dom.minidom.parse(f, **kwargs)
+    with xopen(filename_or_file, "rb", use_auth_token=use_auth_token) as f:
+        return xml.dom.minidom.parse(f, **kwargs)
 
 
 class _IterableFromGenerator(Iterable):
@@ -1011,7 +995,7 @@ class StreamingDownloadManager:
         return url_or_urls
 
     def _download(self, urlpath: str) -> str:
-        urlpath = str(urlpath)
+        urlpath = urlpath
         if is_relative_path(urlpath):
             # append the relative path to the base_path
             urlpath = url_or_path_join(self._base_path, urlpath)
@@ -1036,11 +1020,10 @@ class StreamingDownloadManager:
         >>> extracted_files = dl_manager.extract(downloaded_files)
         ```
         """
-        urlpaths = map_nested(self._extract, url_or_urls, map_tuple=True)
-        return urlpaths
+        return map_nested(self._extract, url_or_urls, map_tuple=True)
 
     def _extract(self, urlpath: str) -> str:
-        urlpath = str(urlpath)
+        urlpath = urlpath
         protocol = _get_extraction_protocol(urlpath, use_auth_token=self.download_config.use_auth_token)
         # get inner file: zip://train-00000.json.gz::https://foo.bar/data.zip -> zip://train-00000.json.gz
         path = urlpath.split("::")[0]

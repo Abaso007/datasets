@@ -129,7 +129,7 @@ def test_dataset_with_image_feature_from_pil_image(infer_feature, shared_datadir
 
     image_path = str(shared_datadir / "test_image_rgb.jpg")
     data = {"image": [PIL.Image.open(image_path)]}
-    features = Features({"image": Image()}) if not infer_feature else None
+    features = None if infer_feature else Features({"image": Image()})
     dset = Dataset.from_dict(data, features=features)
     item = dset[0]
     assert item.keys() == {"image"}
@@ -582,7 +582,7 @@ def test_load_dataset_with_image_feature(shared_datadir, data_dir, dataset_loadi
 
     image_path = str(shared_datadir / "test_image_rgb.jpg")
     dset = load_dataset(dataset_loading_script_dir, split="train", data_dir=data_dir, streaming=streaming)
-    item = dset[0] if not streaming else next(iter(dset))
+    item = next(iter(dset)) if streaming else dset[0]
     assert item.keys() == {"image", "caption"}
     assert isinstance(item["image"], PIL.Image.Image)
     assert os.path.samefile(item["image"].filename, image_path)

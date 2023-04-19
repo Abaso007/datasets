@@ -161,8 +161,7 @@ def string_to_dict(string: str, pattern: str) -> Dict[str, str]:
         raise ValueError(f"String {string} doesn't match the pattern {pattern}")
     values = list(result.groups())
     keys = re.findall(r"{(.+?)}", pattern)
-    _dict = dict(zip(keys, values))
-    return _dict
+    return dict(zip(keys, values))
 
 
 def asdict(obj):
@@ -289,10 +288,10 @@ def no_op_if_value_is_null(func):
 
 def first_non_null_value(iterable):
     """Return the index and the value of the first non-null value in the iterable. If all values are None, return -1 as index."""
-    for i, value in enumerate(iterable):
-        if value is not None:
-            return i, value
-    return -1, None
+    return next(
+        ((i, value) for i, value in enumerate(iterable) if value is not None),
+        (-1, None),
+    )
 
 
 def zip_dict(*dicts):
@@ -355,18 +354,21 @@ def _single_map_nested(args):
 
     # Loop over single examples or batches and write to buffer/file if examples are to be updated
     pbar_iterable = data_struct.items() if isinstance(data_struct, dict) else data_struct
-    pbar_desc = (desc + " " if desc is not None else "") + "#" + str(rank) if rank is not None else desc
+    pbar_desc = (
+        (f"{desc} " if desc is not None else "") + "#" + str(rank)
+        if rank is not None
+        else desc
+    )
     with logging.tqdm(pbar_iterable, disable=disable_tqdm, position=rank, unit="obj", desc=pbar_desc) as pbar:
         if isinstance(data_struct, dict):
             return {k: _single_map_nested((function, v, types, None, True, None)) for k, v in pbar}
+        mapped = [_single_map_nested((function, v, types, None, True, None)) for v in pbar]
+        if isinstance(data_struct, list):
+            return mapped
+        elif isinstance(data_struct, tuple):
+            return tuple(mapped)
         else:
-            mapped = [_single_map_nested((function, v, types, None, True, None)) for v in pbar]
-            if isinstance(data_struct, list):
-                return mapped
-            elif isinstance(data_struct, tuple):
-                return tuple(mapped)
-            else:
-                return np.array(mapped)
+            return np.array(mapped)
 
 
 def map_nested(
@@ -445,7 +447,7 @@ def map_nested(
             for obj in logging.tqdm(iterable, disable=disable_tqdm, desc=desc)
         ]
     else:
-        num_proc = num_proc if num_proc <= len(iterable) else len(iterable)
+        num_proc = min(num_proc, len(iterable))
         split_kwds = []  # We organize the splits ourselve (contiguous splits)
         for index in range(num_proc):
             div = len(iterable) // num_proc
@@ -464,9 +466,9 @@ def map_nested(
         logger.info(
             f"Spawning {num_proc} processes for {len(iterable)} objects in slices of {[len(i[1]) for i in split_kwds]}"
         )
-        initargs, initializer = None, None
-        if not disable_tqdm:
-            initargs, initializer = (RLock(),), tqdm.set_lock
+        initargs, initializer = (
+            (None, None) if disable_tqdm else ((RLock(),), tqdm.set_lock)
+        )
         with Pool(num_proc, initargs=initargs, initializer=initializer) as pool:
             mapped = pool.map(_single_map_nested, split_kwds)
         logger.info(f"Finished {num_proc} processes")
@@ -475,13 +477,12 @@ def map_nested(
 
     if isinstance(data_struct, dict):
         return dict(zip(data_struct.keys(), mapped))
+    if isinstance(data_struct, list):
+        return mapped
+    elif isinstance(data_struct, tuple):
+        return tuple(mapped)
     else:
-        if isinstance(data_struct, list):
-            return mapped
-        elif isinstance(data_struct, tuple):
-            return tuple(mapped)
-        else:
-            return np.array(mapped)
+        return np.array(mapped)
 
 
 class NestedDataStructure:
@@ -572,28 +573,25 @@ def get_imports(file_path: str) -> Tuple[str, str, str, str]:
                 line,
                 flags=re.MULTILINE,
             )
-            if match is None:
-                continue
-        if match.group(1):
+        if match is None:
+            continue
+        if match[1]:
             # The import starts with a '.', we will download the relevant file
-            if any(imp[1] == match.group(2) for imp in imports):
+            if any(imp[1] == match[2] for imp in imports):
                 # We already have this import
                 continue
-            if match.group(3):
+            if match[3]:
                 # The import has a comment with 'From:', we'll retrieve it from the given url
-                url_path = match.group(3)
+                url_path = match[3]
                 url_path, sub_directory = _convert_github_url(url_path)
-                imports.append(("external", match.group(2), url_path, sub_directory))
-            elif match.group(2):
+                imports.append(("external", match[2], url_path, sub_directory))
+            elif match[2]:
                 # The import should be at the same place as the file
-                imports.append(("internal", match.group(2), match.group(2), None))
+                imports.append(("internal", match[2], match[2], None))
+        elif match[3]:
+            imports.append(("library", match[2], match[3], None))
         else:
-            if match.group(3):
-                # The import has a comment with `From: git+https:...`, asks user to pip install from git.
-                url_path = match.group(3)
-                imports.append(("library", match.group(2), url_path, None))
-            else:
-                imports.append(("library", match.group(2), match.group(2), None))
+            imports.append(("library", match[2], match[2], None))
 
     return imports
 
@@ -1042,11 +1040,7 @@ if config.DILL_VERSION < version.parse("0.3.5"):
                 pickler._byref = _byref
             if _memo:
                 pickler._recurse = _recurse
-            if (
-                dill._dill.OLDER
-                and not _byref
-                and (_super or (not _super and _memo) or (not _super and not _memo and _recurse))
-            ):
+            if dill._dill.OLDER and not _byref and (_super or _memo or _recurse):
                 pickler.clear_memo()
             dill._dill.log.info("# F1")
         else:
@@ -1061,7 +1055,7 @@ elif config.DILL_VERSION.release[:3] == version.parse("0.3.5").release:  # 0.3.5
     @pklregister(FunctionType)
     def save_function(pickler, obj):
         if not dill._dill._locate_function(obj, pickler):
-            dill._dill.log.info("F1: %s" % obj)
+            dill._dill.log.info(f"F1: {obj}")
             _recurse = getattr(pickler, "_recurse", None)
             _postproc = getattr(pickler, "_postproc", None)
             _main_modified = getattr(pickler, "_main_modified", None)
@@ -1193,7 +1187,7 @@ elif config.DILL_VERSION.release[:3] == version.parse("0.3.5").release:  # 0.3.5
 
             dill._dill.log.info("# F1")
         else:
-            dill._dill.log.info("F2: %s" % obj)
+            dill._dill.log.info(f"F2: {obj}")
             name = getattr(obj, "__qualname__", getattr(obj, "__name__", None))
             dill._dill.StockPickler.save_global(pickler, obj, name=name)
             dill._dill.log.info("# F2")

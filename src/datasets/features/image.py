@@ -160,19 +160,18 @@ class Image:
         if bytes_ is None:
             if path is None:
                 raise ValueError(f"An image should have one of 'path' or 'bytes' but both are None in {value}.")
+            if is_local_path(path):
+                image = PIL.Image.open(path)
             else:
-                if is_local_path(path):
-                    image = PIL.Image.open(path)
-                else:
-                    source_url = path.split("::")[-1]
-                    try:
-                        repo_id = string_to_dict(source_url, config.HUB_DATASETS_URL)["repo_id"]
-                        use_auth_token = token_per_repo_id.get(repo_id)
-                    except ValueError:
-                        use_auth_token = None
-                    with xopen(path, "rb", use_auth_token=use_auth_token) as f:
-                        bytes_ = BytesIO(f.read())
-                    image = PIL.Image.open(bytes_)
+                source_url = path.split("::")[-1]
+                try:
+                    repo_id = string_to_dict(source_url, config.HUB_DATASETS_URL)["repo_id"]
+                    use_auth_token = token_per_repo_id.get(repo_id)
+                except ValueError:
+                    use_auth_token = None
+                with xopen(path, "rb", use_auth_token=use_auth_token) as f:
+                    bytes_ = BytesIO(f.read())
+                image = PIL.Image.open(bytes_)
         else:
             image = PIL.Image.open(BytesIO(bytes_))
         image.load()  # to avoid "Too many open files" errors
@@ -353,17 +352,16 @@ def objects_to_list_of_image_dicts(
     else:
         raise ImportError("To support encoding images, please install 'Pillow'.")
 
-    if objs:
-        _, obj = first_non_null_value(objs)
-        if isinstance(obj, str):
-            return [{"path": obj, "bytes": None} if obj is not None else None for obj in objs]
-        if isinstance(obj, np.ndarray):
-            obj_to_image_dict_func = no_op_if_value_is_null(encode_np_array)
-            return [obj_to_image_dict_func(obj) for obj in objs]
-        elif isinstance(obj, PIL.Image.Image):
-            obj_to_image_dict_func = no_op_if_value_is_null(encode_pil_image)
-            return [obj_to_image_dict_func(obj) for obj in objs]
-        else:
-            return objs
+    if not objs:
+        return objs
+    _, obj = first_non_null_value(objs)
+    if isinstance(obj, str):
+        return [{"path": obj, "bytes": None} if obj is not None else None for obj in objs]
+    if isinstance(obj, np.ndarray):
+        obj_to_image_dict_func = no_op_if_value_is_null(encode_np_array)
+        return [obj_to_image_dict_func(obj) for obj in objs]
+    elif isinstance(obj, PIL.Image.Image):
+        obj_to_image_dict_func = no_op_if_value_is_null(encode_pil_image)
+        return [obj_to_image_dict_func(obj) for obj in objs]
     else:
         return objs

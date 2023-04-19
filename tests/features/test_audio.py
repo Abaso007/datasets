@@ -592,7 +592,7 @@ def test_load_dataset_with_audio_feature(streaming, jsonl_audio_dataset_path, sh
     data_files = jsonl_audio_dataset_path
     features = Features({"audio": Audio(), "text": Value("string")})
     dset = load_dataset("json", split="train", data_files=data_files, features=features, streaming=streaming)
-    item = dset[0] if not streaming else next(iter(dset))
+    item = next(iter(dset)) if streaming else dset[0]
     assert item.keys() == {"audio", "text"}
     assert item["audio"].keys() == {"path", "array", "sampling_rate"}
     assert item["audio"]["path"] == audio_path

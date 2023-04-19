@@ -41,11 +41,15 @@ def in_memory_pa_table(arrow_file) -> pa.Table:
 
 def _to_testing_blocks(table: TableBlock) -> List[List[TableBlock]]:
     assert len(table) > 2
-    blocks = [
+    return [
         [table.slice(0, 2)],
-        [table.slice(2).drop([c for c in table.column_names if c != "tokens"]), table.slice(2).drop(["tokens"])],
+        [
+            table.slice(2).drop(
+                [c for c in table.column_names if c != "tokens"]
+            ),
+            table.slice(2).drop(["tokens"]),
+        ],
     ]
-    return blocks
 
 
 @pytest.fixture(scope="session")
@@ -704,7 +708,9 @@ def test_concatenation_table_from_tables(axis, in_memory_pa_table, arrow_file):
 def test_concatenation_table_from_tables_axis1_misaligned_blocks(arrow_file):
     table = MemoryMappedTable.from_file(arrow_file)
     t1 = table.slice(0, 2)
-    t2 = table.slice(0, 3).rename_columns([col + "_1" for col in table.column_names])
+    t2 = table.slice(0, 3).rename_columns(
+        [f"{col}_1" for col in table.column_names]
+    )
     concatenated = ConcatenationTable.from_tables(
         [
             ConcatenationTable.from_blocks([[t1], [t1], [t1]]),
@@ -1028,10 +1034,10 @@ def test_concat_tables(arrow_file, in_memory_pa_table):
 
 
 def _interpolation_search_ground_truth(arr: List[int], x: int) -> Union[int, IndexError]:
-    for i in range(len(arr) - 1):
-        if arr[i] <= x < arr[i + 1]:
-            return i
-    return IndexError
+    return next(
+        (i for i in range(len(arr) - 1) if arr[i] <= x < arr[i + 1]),
+        IndexError,
+    )
 
 
 class _ListWithGetitemCounter(list):
@@ -1210,18 +1216,15 @@ def test_embed_table_storage(image_file):
     assert isinstance(embedded_images_table.to_pydict()["image"][0]["bytes"], bytes)
 
 
-@pytest.mark.parametrize(
-    "table",
-    [
-        InMemoryTable(pa.table({"foo": range(10)})),
-        InMemoryTable(pa.concat_tables([pa.table({"foo": range(0, 5)}), pa.table({"foo": range(5, 10)})])),
-        InMemoryTable(pa.concat_tables([pa.table({"foo": [i]}) for i in range(10)])),
-    ],
-)
+@pytest.mark.parametrize("table", [InMemoryTable(pa.table({"foo": range(10)})), InMemoryTable(pa.concat_tables([pa.table({"foo": range(5)}), pa.table({"foo": range(5, 10)})])), InMemoryTable(pa.concat_tables([pa.table({"foo": [i]}) for i in range(10)]))])
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 9, 10, 11, 20])
 @pytest.mark.parametrize("drop_last_batch", [False, True])
 def test_table_iter(table, batch_size, drop_last_batch):
-    num_rows = len(table) if not drop_last_batch else len(table) // batch_size * batch_size
+    num_rows = (
+        len(table) // batch_size * batch_size
+        if drop_last_batch
+        else len(table)
+    )
     num_batches = (num_rows // batch_size) + 1 if num_rows % batch_size else num_rows // batch_size
     subtables = list(table_iter(table, batch_size=batch_size, drop_last_batch=drop_last_batch))
     assert len(subtables) == num_batches

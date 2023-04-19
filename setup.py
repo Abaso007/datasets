@@ -103,6 +103,7 @@ Steps to make a release:
    - Merge the dev version Pull Request
 """
 
+
 from setuptools import find_packages, setup
 
 
@@ -158,31 +159,6 @@ BENCHMARKS_REQUIRE = [
     "protobuf==3.20.3",  # Fix tensorflow 2.3 import `TypeError: Descriptors cannot not be created directly.`
 ]
 
-TESTS_REQUIRE = [
-    # test dependencies
-    "absl-py",
-    "pytest",
-    "pytest-datadir",
-    "pytest-xdist",
-    # optional dependencies
-    "apache-beam>=2.26.0,<2.44.0;python_version<'3.8'",  # doesn't support recent dill versions for recent python versions
-    "elasticsearch<8.0.0",  # 8.0 asks users to provide hosts or cloud_id when instantiating ElasticSearch()
-    "faiss-cpu>=1.6.4",
-    "lz4",
-    "py7zr",
-    "rarfile>=4.0",
-    "sqlalchemy<2.0.0",
-    "s3fs>=2021.11.1;python_version<'3.8'",  # aligned with fsspec[http]>=2021.11.1; test only on python 3.7 for now
-    "tensorflow>=2.3,!=2.6.0,!=2.6.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
-    "tensorflow-macos; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "tiktoken;python_version>='3.8'",
-    "torch",
-    "soundfile>=0.12.1",
-    "transformers",
-    "zstandard",
-]
-
-
 METRICS_TESTS_REQUIRE = [
     # metrics dependencies
     "bert_score>=0.3.6",
@@ -209,9 +185,29 @@ METRICS_TESTS_REQUIRE = [
     "six~=1.15.0",
 ]
 
-TESTS_REQUIRE.extend(VISION_REQUIRE)
-TESTS_REQUIRE.extend(AUDIO_REQUIRE)
-
+TESTS_REQUIRE = [
+    "absl-py",
+    "pytest",
+    "pytest-datadir",
+    "pytest-xdist",
+    "apache-beam>=2.26.0,<2.44.0;python_version<'3.8'",
+    "elasticsearch<8.0.0",
+    "faiss-cpu>=1.6.4",
+    "lz4",
+    "py7zr",
+    "rarfile>=4.0",
+    "sqlalchemy<2.0.0",
+    "s3fs>=2021.11.1;python_version<'3.8'",
+    "tensorflow>=2.3,!=2.6.0,!=2.6.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "tensorflow-macos; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tiktoken;python_version>='3.8'",
+    "torch",
+    "soundfile>=0.12.1",
+    "transformers",
+    "zstandard",
+    *VISION_REQUIRE,
+    *AUDIO_REQUIRE,
+]
 QUALITY_REQUIRE = ["black~=23.1", "ruff>=0.0.241", "pyyaml>=5.3.1"]
 
 DOCS_REQUIRE = [

@@ -100,23 +100,24 @@ class Audio:
             sf.write(buffer, value["array"], value["sampling_rate"], format="wav")
             return {"bytes": buffer.getvalue(), "path": None}
         elif value.get("path") is not None and os.path.isfile(value["path"]):
-            # we set "bytes": None to not duplicate the data if they're already available locally
-            if value["path"].endswith("pcm"):
-                # "PCM" only has raw audio bytes
-                if value.get("sampling_rate") is None:
-                    # At least, If you want to convert "PCM-byte" to "WAV-byte", you have to know sampling rate
-                    raise KeyError("To use PCM files, please specify a 'sampling_rate' in Audio object")
-                if value.get("bytes"):
-                    # If we already had PCM-byte, we don`t have to make "read file, make bytes" (just use it!)
-                    bytes_value = np.frombuffer(value["bytes"], dtype=np.int16).astype(np.float32) / 32767
-                else:
-                    bytes_value = np.memmap(value["path"], dtype="h", mode="r").astype(np.float32) / 32767
-
-                buffer = BytesIO(bytes())
-                sf.write(buffer, bytes_value, value["sampling_rate"], format="wav")
-                return {"bytes": buffer.getvalue(), "path": None}
-            else:
+            if not value["path"].endswith("pcm"):
                 return {"bytes": None, "path": value.get("path")}
+            # "PCM" only has raw audio bytes
+            if value.get("sampling_rate") is None:
+                # At least, If you want to convert "PCM-byte" to "WAV-byte", you have to know sampling rate
+                raise KeyError("To use PCM files, please specify a 'sampling_rate' in Audio object")
+            bytes_value = (
+                np.frombuffer(value["bytes"], dtype=np.int16).astype(np.float32)
+                / 32767
+                if value.get("bytes")
+                else np.memmap(value["path"], dtype="h", mode="r").astype(
+                    np.float32
+                )
+                / 32767
+            )
+            buffer = BytesIO(bytes())
+            sf.write(buffer, bytes_value, value["sampling_rate"], format="wav")
+            return {"bytes": buffer.getvalue(), "path": None}
         elif value.get("bytes") is not None or value.get("path") is not None:
             # store the audio bytes, and path is used to infer the audio format using the file extension
             return {"bytes": value.get("bytes"), "path": value.get("path")}

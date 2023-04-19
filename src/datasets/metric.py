@@ -65,7 +65,7 @@ class FileFreeLock(BaseFileLock):
 # lists - summarize long lists similarly to NumPy
 # arrays/tensors - let the frameworks control formatting
 def summarize_if_long_list(obj):
-    if not type(obj) == list or len(obj) <= 6:
+    if type(obj) != list or len(obj) <= 6:
         return f"{obj}"
 
     def format_chunk(chunk):
@@ -267,7 +267,7 @@ class Metric(MetricInfoMixin):
         file_path = os.path.join(self.data_dir, f"{self.experiment_id}-{self.num_process}-{self.process_id}.arrow")
         filelock = None
         for i in range(self.max_concurrent_cache_files):
-            filelock = FileLock(file_path + ".lock")
+            filelock = FileLock(f"{file_path}.lock")
             try:
                 filelock.acquire(timeout=timeout)
             except Timeout:
@@ -318,7 +318,7 @@ class Metric(MetricInfoMixin):
             if process_id == 0:  # process 0 already has its lock file
                 filelocks.append(self.filelock)
             else:
-                filelock = FileLock(file_path + ".lock")
+                filelock = FileLock(f"{file_path}.lock")
                 try:
                     filelock.acquire(timeout=self.timeout)
                 except Timeout:
@@ -428,13 +428,11 @@ class Metric(MetricInfoMixin):
         all_kwargs = {"predictions": predictions, "references": references, **kwargs}
         if predictions is None and references is None:
             missing_kwargs = {k: None for k in self.features if k not in all_kwargs}
-            all_kwargs.update(missing_kwargs)
-        else:
-            missing_inputs = [k for k in self.features if k not in all_kwargs]
-            if missing_inputs:
-                raise ValueError(
-                    f"Metric inputs are missing: {missing_inputs}. All required inputs are {list(self.features)}"
-                )
+            all_kwargs |= missing_kwargs
+        elif missing_inputs := [k for k in self.features if k not in all_kwargs]:
+            raise ValueError(
+                f"Metric inputs are missing: {missing_inputs}. All required inputs are {list(self.features)}"
+            )
         inputs = {input_name: all_kwargs[input_name] for input_name in self.features}
         compute_kwargs = {k: kwargs[k] for k in kwargs if k not in self.features}
 
@@ -445,31 +443,30 @@ class Metric(MetricInfoMixin):
         self.cache_file_name = None
         self.filelock = None
 
-        if self.process_id == 0:
-            self.data.set_format(type=self.info.format)
+        if self.process_id != 0:
+            return None
+        self.data.set_format(type=self.info.format)
 
-            inputs = {input_name: self.data[input_name] for input_name in self.features}
-            with temp_seed(self.seed):
-                output = self._compute(**inputs, **compute_kwargs)
+        inputs = {input_name: self.data[input_name] for input_name in self.features}
+        with temp_seed(self.seed):
+            output = self._compute(**inputs, **compute_kwargs)
 
-            if self.buf_writer is not None:
-                self.buf_writer = None
+        if self.buf_writer is not None:
+            self.buf_writer = None
+            del self.data
+            self.data = None
+        else:
+            # Release locks and delete all the cache files. Process 0 is released last.
+            for filelock, file_path in reversed(list(zip(self.filelocks, self.file_paths))):
+                logger.info(f"Removing {file_path}")
                 del self.data
                 self.data = None
-            else:
-                # Release locks and delete all the cache files. Process 0 is released last.
-                for filelock, file_path in reversed(list(zip(self.filelocks, self.file_paths))):
-                    logger.info(f"Removing {file_path}")
-                    del self.data
-                    self.data = None
-                    del self.writer
-                    self.writer = None
-                    os.remove(file_path)
-                    filelock.release()
+                del self.writer
+                self.writer = None
+                os.remove(file_path)
+                filelock.release()
 
-            return output
-        else:
-            return None
+        return output
 
     def add_batch(self, *, predictions=None, references=None, **kwargs):
         """Add a batch of predictions and references for the metric's stack.
@@ -486,8 +483,9 @@ class Metric(MetricInfoMixin):
         >>> metric.add_batch(predictions=model_prediction, references=labels)
         ```
         """
-        bad_inputs = [input_name for input_name in kwargs if input_name not in self.features]
-        if bad_inputs:
+        if bad_inputs := [
+            input_name for input_name in kwargs if input_name not in self.features
+        ]:
             raise ValueError(f"Bad inputs for metric: {bad_inputs}. All required inputs are {list(self.features)}")
         batch = {"predictions": predictions, "references": references, **kwargs}
         batch = {intput_name: batch[intput_name] for intput_name in self.features}
@@ -533,8 +531,9 @@ class Metric(MetricInfoMixin):
         >>> metric.add(predictions=model_predictions, references=labels)
         ```
         """
-        bad_inputs = [input_name for input_name in kwargs if input_name not in self.features]
-        if bad_inputs:
+        if bad_inputs := [
+            input_name for input_name in kwargs if input_name not in self.features
+        ]:
             raise ValueError(f"Bad inputs for metric: {bad_inputs}. All required inputs are {list(self.features)}")
         example = {"predictions": prediction, "references": reference, **kwargs}
         example = {intput_name: example[intput_name] for intput_name in self.features}
@@ -552,18 +551,17 @@ class Metric(MetricInfoMixin):
             raise ValueError(error_msg) from None
 
     def _init_writer(self, timeout=1):
-        if self.num_process > 1:
-            if self.process_id == 0:
-                file_path = os.path.join(self.data_dir, f"{self.experiment_id}-{self.num_process}-rdv.lock")
-                self.rendez_vous_lock = FileLock(file_path)
-                try:
-                    self.rendez_vous_lock.acquire(timeout=timeout)
-                except TimeoutError:
-                    raise ValueError(
-                        f"Error in _init_writer: another metric instance is already using the local cache file at {file_path}. "
-                        f"Please specify an experiment_id (currently: {self.experiment_id}) to avoid collision "
-                        f"between distributed metric instances."
-                    ) from None
+        if self.num_process > 1 and self.process_id == 0:
+            file_path = os.path.join(self.data_dir, f"{self.experiment_id}-{self.num_process}-rdv.lock")
+            self.rendez_vous_lock = FileLock(file_path)
+            try:
+                self.rendez_vous_lock.acquire(timeout=timeout)
+            except TimeoutError:
+                raise ValueError(
+                    f"Error in _init_writer: another metric instance is already using the local cache file at {file_path}. "
+                    f"Please specify an experiment_id (currently: {self.experiment_id}) to avoid collision "
+                    f"between distributed metric instances."
+                ) from None
 
         if self.keep_in_memory:
             self.buf_writer = pa.BufferOutputStream()

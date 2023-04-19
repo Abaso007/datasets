@@ -74,7 +74,7 @@ def filenames_for_dataset_split(path, dataset_name, split, filetype_suffix=None,
         num_shards = len(shard_lengths)
         filenames = [f"{prefix}-{shard_id:05d}-of-{num_shards:05d}" for shard_id in range(num_shards)]
         if filetype_suffix:
-            filenames = [filename + f".{filetype_suffix}" for filename in filenames]
+            filenames = [f"{filename}.{filetype_suffix}" for filename in filenames]
         return filenames
     else:
         filename = prefix

@@ -244,8 +244,7 @@ class ArrayXDDynamicTest(unittest.TestCase):
     def get_one_col_dataset(self, first_dim_list, fixed_shape):
         features = datasets.Features({"image": Array3D(shape=(None, *fixed_shape), dtype="float32")})
         dict_values = {"image": [np.random.rand(fdim, *fixed_shape).astype("float32") for fdim in first_dim_list]}
-        dataset = datasets.Dataset.from_dict(dict_values, features=features)
-        return dataset
+        return datasets.Dataset.from_dict(dict_values, features=features)
 
     def get_two_col_datasset(self, first_dim_list, fixed_shape):
         features = datasets.Features(
@@ -255,8 +254,7 @@ class ArrayXDDynamicTest(unittest.TestCase):
             "image": [np.random.rand(fdim, *fixed_shape).astype("float32") for fdim in first_dim_list],
             "text": ["text" for _ in first_dim_list],
         }
-        dataset = datasets.Dataset.from_dict(dict_values, features=features)
-        return dataset
+        return datasets.Dataset.from_dict(dict_values, features=features)
 
     def test_to_pylist(self):
         fixed_shape = (2, 2)

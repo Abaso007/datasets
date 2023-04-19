@@ -19,8 +19,13 @@ pytestmark = pytest.mark.integration
 @require_faiss
 class IndexableDatasetTest(TestCase):
     def _create_dummy_dataset(self):
-        dset = Dataset.from_dict({"filename": ["my_name-train" + "_" + str(x) for x in np.arange(30).tolist()]})
-        return dset
+        return Dataset.from_dict(
+            {
+                "filename": [
+                    "my_name-train" + "_" + str(x) for x in np.arange(30).tolist()
+                ]
+            }
+        )
 
     def test_add_faiss_index(self):
         import faiss

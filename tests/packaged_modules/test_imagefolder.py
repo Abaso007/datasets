@@ -31,11 +31,9 @@ def data_files_with_labels_no_metadata(tmp_path, image_file):
     image_filename2 = subdir_class_1 / "image_dog.jpg"
     shutil.copyfile(image_file, image_filename2)
 
-    data_files_with_labels_no_metadata = DataFilesDict.from_local_or_remote(
+    return DataFilesDict.from_local_or_remote(
         get_data_patterns_locally(str(data_dir)), str(data_dir)
     )
-
-    return data_files_with_labels_no_metadata
 
 
 @pytest.fixture
@@ -361,10 +359,11 @@ def test_generate_examples_with_metadata_that_misses_one_image(
     image_files_with_metadata_that_misses_one_image, drop_metadata
 ):
     image_file, image_file2, image_metadata_file = image_files_with_metadata_that_misses_one_image
-    if not drop_metadata:
-        features = Features({"image": Image(), "caption": Value("string")})
-    else:
-        features = Features({"image": Image()})
+    features = (
+        Features({"image": Image()})
+        if drop_metadata
+        else Features({"image": Image(), "caption": Value("string")})
+    )
     imagefolder = ImageFolder(
         drop_metadata=drop_metadata,
         features=features,

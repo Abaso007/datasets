@@ -114,11 +114,7 @@ def import_main_class(module_path, dataset=True) -> Optional[Union[Type[DatasetB
     """
     module = importlib.import_module(module_path)
 
-    if dataset:
-        main_cls_type = DatasetBuilder
-    else:
-        main_cls_type = Metric
-
+    main_cls_type = DatasetBuilder if dataset else Metric
     # Find the main class in our imported module
     module_main_cls = None
     for name, obj in module.__dict__.items():
@@ -157,7 +153,7 @@ def increase_load_count(name: str, resource_type: str):
     """Update the download count of a dataset or metric."""
     if not config.HF_DATASETS_OFFLINE and config.HF_UPDATE_DOWNLOAD_COUNTS:
         try:
-            head_hf_s3(name, filename=name + ".py", dataset=(resource_type == "dataset"))
+            head_hf_s3(name, filename=f"{name}.py", dataset=(resource_type == "dataset"))
         except Exception:
             pass
 
@@ -192,7 +188,7 @@ def _download_additional_modules(
                 f"comment pointing to the original relative import file path."
             )
         if import_type == "internal":
-            url_or_filename = url_or_path_join(base_path, import_path + ".py")
+            url_or_filename = url_or_path_join(base_path, f"{import_path}.py")
         elif import_type == "external":
             url_or_filename = import_path
         else:
@@ -217,7 +213,7 @@ def _download_additional_modules(
     if needs_to_be_installed:
         _dependencies_str = "dependencies" if len(needs_to_be_installed) > 1 else "dependency"
         _them_str = "them" if len(needs_to_be_installed) > 1 else "it"
-        if "sklearn" in needs_to_be_installed.keys():
+        if "sklearn" in needs_to_be_installed:
             needs_to_be_installed["sklearn"] = "scikit-learn"
         raise ImportError(
             f"To be able to use {name}, you need to install the following {_dependencies_str}: "
@@ -255,9 +251,9 @@ def _copy_script_and_other_resources_in_importable_dir(
     # path is: ./datasets|metrics/dataset|metric_name/hash_from_code/script.py
     # we use a hash as subdirectory_name to be able to have multiple versions of a dataset/metric processing file together
     importable_subdirectory = os.path.join(importable_directory_path, subdirectory_name)
-    importable_local_file = os.path.join(importable_subdirectory, name + ".py")
+    importable_local_file = os.path.join(importable_subdirectory, f"{name}.py")
     # Prevent parallel disk operations
-    lock_path = importable_directory_path + ".lock"
+    lock_path = f"{importable_directory_path}.lock"
     with FileLock(lock_path):
         # Create main dataset/metrics folder if needed
         if download_mode == DownloadMode.FORCE_REDOWNLOAD and os.path.exists(importable_directory_path):
@@ -283,7 +279,7 @@ def _copy_script_and_other_resources_in_importable_dir(
             shutil.copyfile(original_local_path, importable_local_file)
         # Record metadata associating original dataset path with local unique folder
         # Use os.path.splitext to split extension from importable_local_file
-        meta_path = os.path.splitext(importable_local_file)[0] + ".json"
+        meta_path = f"{os.path.splitext(importable_local_file)[0]}.json"
         if not os.path.exists(meta_path):
             meta = {"original file path": original_local_path, "local file path": importable_local_file}
             # the filename is *.py in our case, so better rename to filename.json instead of filename.py.json
@@ -293,7 +289,9 @@ def _copy_script_and_other_resources_in_importable_dir(
         # Copy all the additional imports
         for import_name, import_path in local_imports:
             if os.path.isfile(import_path):
-                full_path_local_import = os.path.join(importable_subdirectory, import_name + ".py")
+                full_path_local_import = os.path.join(
+                    importable_subdirectory, f"{import_name}.py"
+                )
                 if not os.path.exists(full_path_local_import):
                     shutil.copyfile(import_path, full_path_local_import)
             elif os.path.isdir(import_path):
@@ -357,12 +355,13 @@ def infer_module_for_data_files(
             - inferred module name
             - builder kwargs
     """
-    extensions_counter = Counter(
+    if extensions_counter := Counter(
         suffix[1:]
-        for filepath in data_files_list[: config.DATA_FILES_MAX_NUMBER_FOR_MODULE_INFERENCE]
+        for filepath in data_files_list[
+            : config.DATA_FILES_MAX_NUMBER_FOR_MODULE_INFERENCE
+        ]
         for suffix in Path(filepath).suffixes
-    )
-    if extensions_counter:
+    ):
         for ext, _ in extensions_counter.most_common():
             if ext in _EXTENSION_TO_MODULE:
                 return _EXTENSION_TO_MODULE[ext]
@@ -399,8 +398,11 @@ def infer_module_for_data_files_in_archives(
                     : config.ARCHIVED_DATA_FILES_MAX_NUMBER_FOR_MODULE_INFERENCE
                 ]
             ]
-    extensions_counter = Counter(suffix[1:] for filepath in archived_files for suffix in Path(filepath).suffixes)
-    if extensions_counter:
+    if extensions_counter := Counter(
+        suffix[1:]
+        for filepath in archived_files
+        for suffix in Path(filepath).suffixes
+    ):
         most_common = extensions_counter.most_common(1)[0][0]
         if most_common in _EXTENSION_TO_MODULE:
             return _EXTENSION_TO_MODULE[most_common]
@@ -451,15 +453,19 @@ class GithubMetricModuleFactory(_MetricModuleFactory):
         self.name = name
         self.revision = revision
         self.download_config = download_config.copy() if download_config else DownloadConfig()
-        if self.download_config.max_retries < 3:
-            self.download_config.max_retries = 3
+        self.download_config.max_retries = max(self.download_config.max_retries, 3)
         self.download_mode = download_mode
         self.dynamic_modules_path = dynamic_modules_path
-        assert self.name.count("/") == 0
+        assert "/" not in self.name
         increase_load_count(name, resource_type="metric")
 
     def download_loading_script(self, revision: Optional[str]) -> str:
-        file_path = hf_github_url(path=self.name, name=self.name + ".py", revision=revision, dataset=False)
+        file_path = hf_github_url(
+            path=self.name,
+            name=f"{self.name}.py",
+            revision=revision,
+            dataset=False,
+        )
         download_config = self.download_config.copy()
         if download_config.download_desc is None:
             download_config.download_desc = "Downloading builder script"
@@ -474,13 +480,12 @@ class GithubMetricModuleFactory(_MetricModuleFactory):
         except FileNotFoundError:
             if revision is not None:
                 raise
-            else:
-                revision = "main"
-                local_path = self.download_loading_script(revision)
-                logger.warning(
-                    f"Couldn't find a directory or a metric named '{self.name}' in this version. "
-                    f"It was picked from the main branch on github instead."
-                )
+            revision = "main"
+            local_path = self.download_loading_script(revision)
+            logger.warning(
+                f"Couldn't find a directory or a metric named '{self.name}' in this version. "
+                f"It was picked from the main branch on github instead."
+            )
         imports = get_imports(local_path)
         local_imports = _download_additional_modules(
             name=self.name,
@@ -1011,7 +1016,7 @@ class CachedMetricModuleFactory(_MetricModuleFactory):
     ):
         self.name = name
         self.dynamic_modules_path = dynamic_modules_path
-        assert self.name.count("/") == 0
+        assert "/" not in self.name
 
     def get_module(self) -> MetricModule:
         dynamic_modules_path = self.dynamic_modules_path if self.dynamic_modules_path else init_dynamic_modules()
@@ -1026,7 +1031,11 @@ class CachedMetricModuleFactory(_MetricModuleFactory):
         # get most recent
 
         def _get_modification_time(module_hash):
-            return (Path(importable_directory_path) / module_hash / (self.name + ".py")).stat().st_mtime
+            return (
+                (Path(importable_directory_path) / module_hash / f"{self.name}.py")
+                .stat()
+                .st_mtime
+            )
 
         hash = sorted(hashes, key=_get_modification_time)[-1]
         logger.warning(
@@ -1104,7 +1113,7 @@ def dataset_module_factory(
 
     filename = list(filter(lambda x: x, path.replace(os.sep, "/").split("/")))[-1]
     if not filename.endswith(".py"):
-        filename = filename + ".py"
+        filename = f"{filename}.py"
     combined_path = os.path.join(path, filename)
 
     # We have several ways to get a dataset builder:
@@ -1131,7 +1140,6 @@ def dataset_module_factory(
             download_config=download_config,
             download_mode=download_mode,
         ).get_module()
-    # Try locally
     elif path.endswith(filename):
         if os.path.isfile(path):
             return LocalDatasetModuleFactoryWithScript(
@@ -1147,7 +1155,6 @@ def dataset_module_factory(
         return LocalDatasetModuleFactoryWithoutScript(
             path, data_dir=data_dir, data_files=data_files, download_mode=download_mode
         ).get_module()
-    # Try remotely
     elif is_relative_path(path) and path.count("/") <= 1:
         try:
             _raise_if_offline_mode_is_enabled()
@@ -1171,12 +1178,12 @@ def dataset_module_factory(
                     raise ConnectionError(f"Couldn't reach '{path}' on the Hub ({type(e).__name__})")
                 elif "404" in str(e):
                     msg = f"Dataset '{path}' doesn't exist on the Hub"
-                    raise FileNotFoundError(msg + f" at revision '{revision}'" if revision else msg)
+                    raise FileNotFoundError(f"{msg} at revision '{revision}'" if revision else msg)
                 elif "401" in str(e):
                     msg = f"Dataset '{path}' doesn't exist on the Hub"
-                    msg = msg + f" at revision '{revision}'" if revision else msg
+                    msg = f"{msg} at revision '{revision}'" if revision else msg
                     raise FileNotFoundError(
-                        msg + ". If the repo is private or gated, make sure to log in with `huggingface-cli login`."
+                        f"{msg}. If the repo is private or gated, make sure to log in with `huggingface-cli login`."
                     )
                 else:
                     raise e
@@ -1279,7 +1286,7 @@ def metric_module_factory(
 
         filename = list(filter(lambda x: x, path.replace(os.sep, "/").split("/")))[-1]
         if not filename.endswith(".py"):
-            filename = filename + ".py"
+            filename = f"{filename}.py"
         combined_path = os.path.join(path, filename)
         # Try locally
         if path.endswith(filename):
@@ -1293,7 +1300,7 @@ def metric_module_factory(
             return LocalMetricModuleFactory(
                 combined_path, download_mode=download_mode, dynamic_modules_path=dynamic_modules_path
             ).get_module()
-        elif is_relative_path(path) and path.count("/") == 0:
+        elif is_relative_path(path) and "/" not in path:
             try:
                 return GithubMetricModuleFactory(
                     path,
@@ -1513,10 +1520,11 @@ def load_dataset_builder(
 
     if path in _PACKAGED_DATASETS_MODULES and data_files is None:
         error_msg = f"Please specify the data files to load for the {path} dataset builder."
-        example_extensions = [
-            extension for extension in _EXTENSION_TO_MODULE if _EXTENSION_TO_MODULE[extension] == path
-        ]
-        if example_extensions:
+        if example_extensions := [
+            extension
+            for extension in _EXTENSION_TO_MODULE
+            if _EXTENSION_TO_MODULE[extension] == path
+        ]:
             error_msg += f'\nFor example `data_files={{"train": "path/to/data/train/*.{example_extensions[0]}"}}`'
         raise ValueError(error_msg)
 
@@ -1760,7 +1768,9 @@ def load_dataset(
 
     download_mode = DownloadMode(download_mode or DownloadMode.REUSE_DATASET_IF_EXISTS)
     verification_mode = VerificationMode(
-        (verification_mode or VerificationMode.BASIC_CHECKS) if not save_infos else VerificationMode.ALL_CHECKS
+        VerificationMode.ALL_CHECKS
+        if save_infos
+        else (verification_mode or VerificationMode.BASIC_CHECKS)
     )
 
     # Create a dataset builder

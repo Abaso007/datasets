@@ -105,5 +105,4 @@ class Squad(datasets.Metric):
                 ]
             }
         ]
-        score = evaluate(dataset=dataset, predictions=pred_dict)
-        return score
+        return evaluate(dataset=dataset, predictions=pred_dict)

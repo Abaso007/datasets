@@ -51,21 +51,22 @@ class SqlConfig(datasets.BuilderConfig):
         # The process of stringifying is explained here: http://docs.sqlalchemy.org/en/latest/faq/sqlexpressions.html
         sql = config_kwargs["sql"]
         if not isinstance(sql, str):
-            if datasets.config.SQLALCHEMY_AVAILABLE and "sqlalchemy" in sys.modules:
-                import sqlalchemy
-
-                if isinstance(sql, sqlalchemy.sql.Selectable):
-                    engine = sqlalchemy.create_engine(config_kwargs["con"].split("://")[0] + "://")
-                    sql_str = str(sql.compile(dialect=engine.dialect))
-                    config_kwargs["sql"] = sql_str
-                else:
-                    raise TypeError(
-                        f"Supported types for 'sql' are string and sqlalchemy.sql.Selectable but got {type(sql)}: {sql}"
-                    )
-            else:
+            if (
+                not datasets.config.SQLALCHEMY_AVAILABLE
+                or "sqlalchemy" not in sys.modules
+            ):
                 raise TypeError(
                     f"Supported types for 'sql' are string and sqlalchemy.sql.Selectable but got {type(sql)}: {sql}"
                 )
+            import sqlalchemy
+
+            if not isinstance(sql, sqlalchemy.sql.Selectable):
+                raise TypeError(
+                    f"Supported types for 'sql' are string and sqlalchemy.sql.Selectable but got {type(sql)}: {sql}"
+                )
+            engine = sqlalchemy.create_engine(config_kwargs["con"].split("://")[0] + "://")
+            sql_str = str(sql.compile(dialect=engine.dialect))
+            config_kwargs["sql"] = sql_str
         con = config_kwargs["con"]
         if not isinstance(con, str):
             config_kwargs["con"] = id(con)
@@ -77,14 +78,13 @@ class SqlConfig(datasets.BuilderConfig):
 
     @property
     def pd_read_sql_kwargs(self):
-        pd_read_sql_kwargs = {
+        return {
             "index_col": self.index_col,
             "columns": self.columns,
             "params": self.params,
             "coerce_float": self.coerce_float,
             "parse_dates": self.parse_dates,
         }
-        return pd_read_sql_kwargs
 
 
 class Sql(datasets.ArrowBasedBuilder):

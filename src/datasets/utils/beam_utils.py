@@ -29,10 +29,8 @@ def upload_local_to_remote(local_file_path, remote_file_path, force_upload=False
             return
     with fs.create(remote_file_path) as remote_file:
         with open(local_file_path, "rb") as local_file:
-            chunk = local_file.read(CHUNK_SIZE)
-            while chunk:
+            while chunk := local_file.read(CHUNK_SIZE):
                 remote_file.write(chunk)
-                chunk = local_file.read(CHUNK_SIZE)
 
 
 def download_remote_to_local(remote_file_path, local_file_path, force_download=False):
@@ -46,7 +44,5 @@ def download_remote_to_local(remote_file_path, local_file_path, force_download=F
             return
     with fs.open(remote_file_path) as remote_file:
         with open(local_file_path, "wb") as local_file:
-            chunk = remote_file.read(CHUNK_SIZE)
-            while chunk:
+            while chunk := remote_file.read(CHUNK_SIZE):
                 local_file.write(chunk)
-                chunk = remote_file.read(CHUNK_SIZE)
