@@ -40,8 +40,7 @@ def f1_score(prediction, ground_truth):
         return 0
     precision = 1.0 * num_same / len(prediction_tokens)
     recall = 1.0 * num_same / len(ground_truth_tokens)
-    f1 = (2 * precision * recall) / (precision + recall)
-    return f1
+    return (2 * precision * recall) / (precision + recall)
 
 
 def exact_match_score(prediction, ground_truth):

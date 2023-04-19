@@ -103,17 +103,17 @@ class RunBeamCommand(BaseDatasetsCLICommand):
         else:
             beam_options = None
         if self._all_configs and len(builder_cls.BUILDER_CONFIGS) > 0:
-            for builder_config in builder_cls.BUILDER_CONFIGS:
-                builders.append(
-                    builder_cls(
-                        config_name=builder_config.name,
-                        data_dir=self._data_dir,
-                        hash=dataset_module.hash,
-                        beam_options=beam_options,
-                        cache_dir=self._cache_dir,
-                        base_path=dataset_module.builder_kwargs.get("base_path"),
-                    )
+            builders.extend(
+                builder_cls(
+                    config_name=builder_config.name,
+                    data_dir=self._data_dir,
+                    hash=dataset_module.hash,
+                    beam_options=beam_options,
+                    cache_dir=self._cache_dir,
+                    base_path=dataset_module.builder_kwargs.get("base_path"),
                 )
+                for builder_config in builder_cls.BUILDER_CONFIGS
+            )
         else:
             builders.append(
                 builder_cls(
@@ -128,10 +128,12 @@ class RunBeamCommand(BaseDatasetsCLICommand):
 
         for builder in builders:
             builder.download_and_prepare(
-                download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS
-                if not self._force_redownload
-                else DownloadMode.FORCE_REDOWNLOAD,
-                download_config=DownloadConfig(cache_dir=config.DOWNLOADED_DATASETS_PATH),
+                download_mode=DownloadMode.FORCE_REDOWNLOAD
+                if self._force_redownload
+                else DownloadMode.REUSE_CACHE_IF_EXISTS,
+                download_config=DownloadConfig(
+                    cache_dir=config.DOWNLOADED_DATASETS_PATH
+                ),
                 verification_mode=VerificationMode.NO_CHECKS
                 if self._ignore_verifications
                 else VerificationMode.ALL_CHECKS,
@@ -148,7 +150,7 @@ class RunBeamCommand(BaseDatasetsCLICommand):
         if self._save_infos:
             dataset_infos_path = os.path.join(builder_cls.get_imported_module_dir(), config.DATASETDICT_INFOS_FILENAME)
 
-            name = Path(path).name + ".py"
+            name = f"{Path(path).name}.py"
 
             combined_path = os.path.join(path, name)
             if os.path.isfile(path):

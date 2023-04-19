@@ -120,7 +120,7 @@ class Perplexity(datasets.Metric):
             existing_special_tokens = list(tokenizer.special_tokens_map_extended.values())
             # check that the model already has at least one special token defined
             assert (
-                len(existing_special_tokens) > 0
+                existing_special_tokens
             ), "If batch_size > 1, model must have at least one special token to use for padding. Please use a different model or set batch_size=1."
             # assign one of the special tokens to also be the pad token
             tokenizer.add_special_tokens({"pad_token": existing_special_tokens[0]})

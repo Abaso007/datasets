@@ -35,22 +35,19 @@ def inject_arrow_table_documentation(arrow_table_method):
 def _in_memory_arrow_table_from_file(filename: str) -> pa.Table:
     in_memory_stream = pa.input_stream(filename)
     opened_stream = pa.ipc.open_stream(in_memory_stream)
-    pa_table = opened_stream.read_all()
-    return pa_table
+    return opened_stream.read_all()
 
 
 def _in_memory_arrow_table_from_buffer(buffer: pa.Buffer) -> pa.Table:
     stream = pa.BufferReader(buffer)
     opened_stream = pa.ipc.open_stream(stream)
-    table = opened_stream.read_all()
-    return table
+    return opened_stream.read_all()
 
 
 def _memory_mapped_arrow_table_from_file(filename: str) -> pa.Table:
     memory_mapped_stream = pa.memory_map(filename)
     opened_stream = pa.ipc.open_stream(memory_mapped_stream)
-    pa_table = opened_stream.read_all()
-    return pa_table
+    return opened_stream.read_all()
 
 
 def _write_table_to_file(table: pa.Table, filename: str) -> int:
@@ -139,12 +136,11 @@ class IndexedTableMixin:
         i = _interpolation_search(self._offsets, offset)
         if length is None or length + offset >= self._offsets[-1]:
             batches = self._batches[i:]
-            batches[0] = batches[0].slice(offset - self._offsets[i])
         else:
             j = _interpolation_search(self._offsets, offset + length - 1)
             batches = self._batches[i : j + 1]
             batches[-1] = batches[-1].slice(0, offset + length - self._offsets[j])
-            batches[0] = batches[0].slice(offset - self._offsets[i])
+        batches[0] = batches[0].slice(offset - self._offsets[i])
         return pa.Table.from_batches(batches, schema=self._schema)
 
 
@@ -174,19 +170,16 @@ class Table(IndexedTableMixin):
         return _deepcopy(self, memo)
 
     def __getstate__(self):
-        # We can't pickle objects that are bigger than 4GiB, or it causes OverflowError
-        # So we write the table on disk instead
-        if self.table.nbytes >= config.MAX_TABLE_NBYTES_FOR_PICKLING:
-            table = self.table
-            with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".arrow") as tmp_file:
-                filename = tmp_file.name
-                logger.debug(
-                    f"Attempting to pickle a table bigger than 4GiB. Writing it on the disk instead at {filename}"
-                )
-                _write_table_to_file(table=table, filename=filename)
-                return {"path": filename}
-        else:
+        if self.table.nbytes < config.MAX_TABLE_NBYTES_FOR_PICKLING:
             return {"table": self.table}
+        table = self.table
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".arrow") as tmp_file:
+            filename = tmp_file.name
+            logger.debug(
+                f"Attempting to pickle a table bigger than 4GiB. Writing it on the disk instead at {filename}"
+            )
+            _write_table_to_file(table=table, filename=filename)
+            return {"path": filename}
 
     def __setstate__(self, state):
         if "path" in state:
@@ -1556,9 +1549,9 @@ class ConcatenationTable(Table):
             `datasets.table.Table`
         """
         table = table_flatten(self.table, *args, **kwargs)
-        blocks = []
-        for tables in self.blocks:
-            blocks.append([t.flatten(*args, **kwargs) for t in tables])
+        blocks = [
+            [t.flatten(*args, **kwargs) for t in tables] for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
     def combine_chunks(self, *args, **kwargs):
@@ -1576,9 +1569,10 @@ class ConcatenationTable(Table):
             `datasets.table.Table`
         """
         table = self.table.combine_chunks(*args, **kwargs)
-        blocks = []
-        for tables in self.blocks:
-            blocks.append([t.combine_chunks(*args, **kwargs) for t in tables])
+        blocks = [
+            [t.combine_chunks(*args, **kwargs) for t in tables]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
     def cast(self, target_schema, *args, **kwargs):
@@ -1603,9 +1597,16 @@ class ConcatenationTable(Table):
             new_tables = []
             fields = list(target_schema)
             for subtable in subtables:
-                subfields = []
-                for name in subtable.column_names:
-                    subfields.append(fields.pop(next(i for i, field in enumerate(fields) if field.name == name)))
+                subfields = [
+                    fields.pop(
+                        next(
+                            i
+                            for i, field in enumerate(fields)
+                            if field.name == name
+                        )
+                    )
+                    for name in subtable.column_names
+                ]
                 subfeatures = Features({subfield.name: target_features[subfield.name] for subfield in subfields})
                 subschema = subfeatures.arrow_schema
                 new_tables.append(subtable.cast(subschema, *args, **kwargs))
@@ -1625,9 +1626,10 @@ class ConcatenationTable(Table):
             `datasets.table.Table`: shallow_copy
         """
         table = self.table.replace_schema_metadata(*args, **kwargs)
-        blocks = []
-        for tables in self.blocks:
-            blocks.append([t.replace_schema_metadata(*args, **kwargs) for t in tables])
+        blocks = [
+            [t.replace_schema_metadata(*args, **kwargs) for t in tables]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, self.blocks)
 
     def add_column(self, *args, **kwargs):
@@ -1682,14 +1684,15 @@ class ConcatenationTable(Table):
         """
         table = self.table.remove_column(i, *args, **kwargs)
         name = self.table.column_names[i]
-        blocks = []
-        for tables in self.blocks:
-            blocks.append(
-                [
-                    t.remove_column(t.column_names.index(name), *args, **kwargs) if name in t.column_names else t
-                    for t in tables
-                ]
-            )
+        blocks = [
+            [
+                t.remove_column(t.column_names.index(name), *args, **kwargs)
+                if name in t.column_names
+                else t
+                for t in tables
+            ]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
     def set_column(self, *args, **kwargs):
@@ -1717,11 +1720,15 @@ class ConcatenationTable(Table):
         """
         table = self.table.rename_columns(names, *args, **kwargs)
         names = dict(zip(self.table.column_names, names))
-        blocks = []
-        for tables in self.blocks:
-            blocks.append(
-                [t.rename_columns([names[name] for name in t.column_names], *args, **kwargs) for t in tables]
-            )
+        blocks = [
+            [
+                t.rename_columns(
+                    [names[name] for name in t.column_names], *args, **kwargs
+                )
+                for t in tables
+            ]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
     def drop(self, columns, *args, **kwargs):
@@ -1740,9 +1747,15 @@ class ConcatenationTable(Table):
                 New table without the columns.
         """
         table = self.table.drop(columns, *args, **kwargs)
-        blocks = []
-        for tables in self.blocks:
-            blocks.append([t.drop([c for c in columns if c in t.column_names], *args, **kwargs) for t in tables])
+        blocks = [
+            [
+                t.drop(
+                    [c for c in columns if c in t.column_names], *args, **kwargs
+                )
+                for t in tables
+            ]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
     def select(self, columns, *args, **kwargs):
@@ -1759,9 +1772,15 @@ class ConcatenationTable(Table):
             :class:`datasets.table.Table`: New table with the specified columns, and metadata preserved.
         """
         table = self.table.select(columns, *args, **kwargs)
-        blocks = []
-        for tables in self.blocks:
-            blocks.append([t.select([c for c in columns if c in t.column_names], *args, **kwargs) for t in tables])
+        blocks = [
+            [
+                t.select(
+                    [c for c in columns if c in t.column_names], *args, **kwargs
+                )
+                for t in tables
+            ]
+            for tables in self.blocks
+        ]
         return ConcatenationTable(table, blocks)
 
 
@@ -2048,15 +2067,14 @@ def cast_array_to_feature(array: pa.Array, feature: "FeatureType", allow_number_
             casted_values = _c(array.values, feature[0])
             if casted_values.type == array.values.type:
                 return array
-            else:
-                if array.null_count > 0:
-                    if config.PYARROW_VERSION.major < 10:
-                        warnings.warn(
-                            f"None values are converted to empty lists in `pyarrow<10.0.0` when converting array to {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676."
-                        )
-                    else:
-                        return pa.ListArray.from_arrays(array.offsets, casted_values, mask=array.is_null())
-                return pa.ListArray.from_arrays(array.offsets, casted_values)
+            if array.null_count > 0:
+                if config.PYARROW_VERSION.major < 10:
+                    warnings.warn(
+                        f"None values are converted to empty lists in `pyarrow<10.0.0` when converting array to {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676."
+                    )
+                else:
+                    return pa.ListArray.from_arrays(array.offsets, casted_values, mask=array.is_null())
+            return pa.ListArray.from_arrays(array.offsets, casted_values)
         elif isinstance(feature, Sequence):
             if feature.length > -1:
                 if feature.length * len(array) == len(array.values):
@@ -2065,17 +2083,16 @@ def cast_array_to_feature(array: pa.Array, feature: "FeatureType", allow_number_
                 casted_values = _c(array.values, feature.feature)
                 if casted_values.type == array.values.type:
                     return array
-                else:
-                    if array.null_count > 0:
-                        if config.PYARROW_VERSION.major < 10:
-                            warnings.warn(
-                                f"None values are converted to empty lists in `pyarrow<10.0.0` when converting array to {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676."
-                            )
-                        else:
-                            return pa.ListArray.from_arrays(
-                                array.offsets, _c(array.values, feature.feature), mask=array.is_null()
-                            )
-                    return pa.ListArray.from_arrays(array.offsets, _c(array.values, feature.feature))
+                if array.null_count > 0:
+                    if config.PYARROW_VERSION.major < 10:
+                        warnings.warn(
+                            f"None values are converted to empty lists in `pyarrow<10.0.0` when converting array to {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676."
+                        )
+                    else:
+                        return pa.ListArray.from_arrays(
+                            array.offsets, _c(array.values, feature.feature), mask=array.is_null()
+                        )
+                return pa.ListArray.from_arrays(array.offsets, _c(array.values, feature.feature))
     elif pa.types.is_fixed_size_list(array.type):
         # feature must be either [subfeature] or Sequence(subfeature)
         if isinstance(feature, list):
@@ -2168,17 +2185,16 @@ def embed_array_storage(array: pa.Array, feature: "FeatureType"):
                 casted_values = _e(array.values, feature.feature)
                 if casted_values.type == array.values.type:
                     return array
-                else:
-                    if array.null_count > 0:
-                        if config.PYARROW_VERSION.major < 10:
-                            warnings.warn(
-                                f"None values are converted to empty lists when embedding array storage with {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676. This will raise an error in a future major version of `datasets`"
-                            )
-                        else:
-                            return pa.ListArray.from_arrays(
-                                array.offsets, _e(array.values, feature.feature), mask=array.is_null()
-                            )
-                    return pa.ListArray.from_arrays(array.offsets, _e(array.values, feature.feature))
+                if array.null_count > 0:
+                    if config.PYARROW_VERSION.major < 10:
+                        warnings.warn(
+                            f"None values are converted to empty lists when embedding array storage with {feature}. Install `pyarrow>=10.0.0` to avoid this behavior. More info: https://github.com/huggingface/datasets/issues/3676. This will raise an error in a future major version of `datasets`"
+                        )
+                    else:
+                        return pa.ListArray.from_arrays(
+                            array.offsets, _e(array.values, feature.feature), mask=array.is_null()
+                        )
+                return pa.ListArray.from_arrays(array.offsets, _e(array.values, feature.feature))
     elif pa.types.is_fixed_size_list(array.type):
         # feature must be either [subfeature] or Sequence(subfeature)
         if isinstance(feature, list):

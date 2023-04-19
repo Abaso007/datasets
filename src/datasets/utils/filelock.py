@@ -99,8 +99,7 @@ class Timeout(TimeoutError):
         return None
 
     def __str__(self):
-        temp = f"The file lock '{self.lock_file}' could not be acquired."
-        return temp
+        return f"The file lock '{self.lock_file}' could not be acquired."
 
 
 # Classes
@@ -330,13 +329,12 @@ class BaseFileLock:
 
     def hash_filename_if_too_long(self, path: str, max_length: int) -> str:
         filename = os.path.basename(path)
-        if len(filename) > max_length and max_length > 0:
-            dirname = os.path.dirname(path)
-            hashed_filename = str(hash(filename))
-            new_filename = filename[: max_length - len(hashed_filename) - 8] + "..." + hashed_filename + ".lock"
-            return os.path.join(dirname, new_filename)
-        else:
+        if not len(filename) > max_length > 0:
             return path
+        dirname = os.path.dirname(path)
+        hashed_filename = str(hash(filename))
+        new_filename = f"{filename[:max_length - len(hashed_filename) - 8]}...{hashed_filename}.lock"
+        return os.path.join(dirname, new_filename)
 
 
 # Windows locking mechanism

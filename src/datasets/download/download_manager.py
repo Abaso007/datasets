@@ -133,7 +133,7 @@ def _get_extraction_protocol_with_magic_number(f) -> Optional[str]:
 
 
 def _get_extraction_protocol(path: str) -> Optional[str]:
-    path = str(path)
+    path = path
     extension = _get_path_extension(path)
     # TODO(mariosasko): The below check will be useful once we can preserve the original extension in the new cache layout (use the `filename` parameter of `hf_hub_download`)
     if (
@@ -446,7 +446,7 @@ class DownloadManager:
         return downloaded_path_or_paths.data
 
     def _download(self, url_or_filename: str, download_config: DownloadConfig) -> str:
-        url_or_filename = str(url_or_filename)
+        url_or_filename = url_or_filename
         if is_relative_path(url_or_filename):
             # append the relative path to the base_path
             url_or_filename = url_or_path_join(self._base_path, url_or_filename)

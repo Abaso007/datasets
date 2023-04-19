@@ -25,8 +25,7 @@ def get_jaccard(prediction, ground_truth):
 
     intersection = ground_truth.intersection(prediction)
     union = ground_truth.union(prediction)
-    jaccard = len(intersection) / len(union)
-    return jaccard
+    return len(intersection) / len(union)
 
 
 def normalize_answer(s):
@@ -115,20 +114,20 @@ def process_precisions(precisions):
 def get_aupr(precisions, recalls):
     processed_precisions = process_precisions(precisions)
     aupr = np.trapz(processed_precisions, recalls)
-    if np.isnan(aupr):
-        return 0
-    return aupr
+    return 0 if np.isnan(aupr) else aupr
 
 
 def get_prec_at_recall(precisions, recalls, recall_thresh):
     """Assumes recalls are sorted in increasing order"""
     processed_precisions = process_precisions(precisions)
-    prec_at_recall = 0
-    for prec, recall in zip(processed_precisions, recalls):
-        if recall >= recall_thresh:
-            prec_at_recall = prec
-            break
-    return prec_at_recall
+    return next(
+        (
+            prec
+            for prec, recall in zip(processed_precisions, recalls)
+            if recall >= recall_thresh
+        ),
+        0,
+    )
 
 
 def exact_match_score(prediction, ground_truth):

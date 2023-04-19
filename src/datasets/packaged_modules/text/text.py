@@ -55,17 +55,18 @@ class Text(datasets.ArrowBasedBuilder):
         return splits
 
     def _cast_table(self, pa_table: pa.Table) -> pa.Table:
-        if self.config.features is not None:
-            schema = self.config.features.arrow_schema
-            if all(not require_storage_cast(feature) for feature in self.config.features.values()):
-                # cheaper cast
-                pa_table = pa_table.cast(schema)
-            else:
-                # more expensive cast; allows str <-> int/float or str to Audio for example
-                pa_table = table_cast(pa_table, schema)
-            return pa_table
-        else:
+        if self.config.features is None:
             return pa_table.cast(pa.schema({"text": pa.string()}))
+        schema = self.config.features.arrow_schema
+        pa_table = (
+            pa_table.cast(schema)
+            if all(
+                not require_storage_cast(feature)
+                for feature in self.config.features.values()
+            )
+            else table_cast(pa_table, schema)
+        )
+        return pa_table
 
     def _generate_tables(self, files):
         pa_table_names = list(self.config.features) if self.config.features is not None else ["text"]

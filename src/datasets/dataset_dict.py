@@ -55,16 +55,15 @@ class DatasetDict(dict):
     def __getitem__(self, k) -> Dataset:
         if isinstance(k, (str, NamedSplit)) or len(self) == 0:
             return super().__getitem__(k)
-        else:
-            available_suggested_splits = [
-                split for split in (Split.TRAIN, Split.TEST, Split.VALIDATION) if split in self
-            ]
-            suggested_split = available_suggested_splits[0] if available_suggested_splits else list(self)[0]
-            raise KeyError(
-                f"Invalid key: {k}. Please first select a split. For example: "
-                f"`my_dataset_dictionary['{suggested_split}'][{k}]`. "
-                f"Available splits: {sorted(self)}"
-            )
+        available_suggested_splits = [
+            split for split in (Split.TRAIN, Split.TEST, Split.VALIDATION) if split in self
+        ]
+        suggested_split = available_suggested_splits[0] if available_suggested_splits else list(self)[0]
+        raise KeyError(
+            f"Invalid key: {k}. Please first select a split. For example: "
+            f"`my_dataset_dictionary['{suggested_split}'][{k}]`. "
+            f"Available splits: {sorted(self)}"
+        )
 
     @property
     def data(self) -> Dict[str, Table]:

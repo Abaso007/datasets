@@ -162,9 +162,9 @@ class MockDownloadManager:
             dummy_data_dict[key] = value
 
         # make sure that values are unique
-        if all([isinstance(i, str) for i in dummy_data_dict.values()]) and len(set(dummy_data_dict.values())) < len(
-            dummy_data_dict.values()
-        ):
+        if all(isinstance(i, str) for i in dummy_data_dict.values()) and len(
+            set(dummy_data_dict.values())
+        ) < len(dummy_data_dict.values()):
             # append key to value to make its name unique
             dummy_data_dict = {key: value + key for key, value in dummy_data_dict.items()}
 

@@ -127,5 +127,5 @@ def get_formatter(format_type: Optional[str], **format_kwargs) -> Formatter:
         raise _FORMAT_TYPES_ALIASES_UNAVAILABLE[format_type]
     else:
         raise ValueError(
-            f"Return type should be None or selected in {list(type for type in _FORMAT_TYPES.keys() if type != None)}, but got '{format_type}'"
+            f"Return type should be None or selected in {[type for type in _FORMAT_TYPES.keys() if type != None]}, but got '{format_type}'"
         )

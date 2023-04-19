@@ -70,7 +70,9 @@ def is_local_path(url_or_filename: str) -> bool:
     # On unix the scheme of a local path is empty (for both absolute and relative),
     # while on windows the scheme is the drive name (ex: "c") for absolute paths.
     # for details on the windows behavior, see https://bugs.python.org/issue42215
-    return urlparse(url_or_filename).scheme == "" or os.path.ismount(urlparse(url_or_filename).scheme + ":/")
+    return urlparse(url_or_filename).scheme == "" or os.path.ismount(
+        f"{urlparse(url_or_filename).scheme}:/"
+    )
 
 
 def is_relative_path(url_or_filename: str) -> bool:
@@ -139,7 +141,7 @@ def hash_url_to_filename(url, etag=None):
     if etag:
         etag_bytes = etag.encode("utf-8")
         etag_hash = sha256(etag_bytes)
-        filename += "." + etag_hash.hexdigest()
+        filename += f".{etag_hash.hexdigest()}"
 
     if url.endswith(".py"):
         filename += ".py"
@@ -232,7 +234,7 @@ def get_datasets_user_agent(user_agent: Optional[Union[str, dict]] = None) -> st
     if isinstance(user_agent, dict):
         ua += f"; {'; '.join(f'{k}/{v}' for k, v in user_agent.items())}"
     elif isinstance(user_agent, str):
-        ua += "; " + user_agent
+        ua += f"; {user_agent}"
     return ua
 
 
@@ -260,7 +262,9 @@ def _raise_if_offline_mode_is_enabled(msg: Optional[str] = None):
     """Raise an OfflineModeIsEnabled error (subclass of ConnectionError) if HF_DATASETS_OFFLINE is True."""
     if config.HF_DATASETS_OFFLINE:
         raise OfflineModeIsEnabled(
-            "Offline mode is enabled." if msg is None else "Offline mode is enabled. " + str(msg)
+            "Offline mode is enabled."
+            if msg is None
+            else f"Offline mode is enabled. {str(msg)}"
         )
 
 
@@ -283,11 +287,10 @@ def _retry(
         except exceptions as err:
             if retry >= max_retries or (status_codes and err.response.status_code not in status_codes):
                 raise err
-            else:
-                sleep_time = min(max_wait_time, base_wait_time * 2**retry)  # Exponential backoff
-                logger.info(f"{func} timed out, retrying in {sleep_time}s... [{retry/max_retries}]")
-                time.sleep(sleep_time)
-                retry += 1
+            sleep_time = min(max_wait_time, base_wait_time * 2**retry)  # Exponential backoff
+            logger.info(f"{func} timed out, retrying in {sleep_time}s... [{retry/max_retries}]")
+            time.sleep(sleep_time)
+            retry += 1
 
 
 def _request_with_retry(
@@ -322,10 +325,9 @@ def _request_with_retry(
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as err:
             if tries > max_retries:
                 raise err
-            else:
-                logger.info(f"{method} request to {url} timed out, retrying... [{tries/max_retries}]")
-                sleep_time = min(max_wait_time, base_wait_time * 2 ** (tries - 1))  # Exponential backoff
-                time.sleep(sleep_time)
+            logger.info(f"{method} request to {url} timed out, retrying... [{tries/max_retries}]")
+            sleep_time = min(max_wait_time, base_wait_time * 2 ** (tries - 1))  # Exponential backoff
+            time.sleep(sleep_time)
     return response
 
 
@@ -410,7 +412,7 @@ def http_head(
 ) -> requests.Response:
     headers = copy.deepcopy(headers) or {}
     headers["user-agent"] = get_datasets_user_agent(user_agent=headers.get("user-agent"))
-    response = _request_with_retry(
+    return _request_with_retry(
         method="HEAD",
         url=url,
         proxies=proxies,
@@ -420,7 +422,6 @@ def http_head(
         timeout=timeout,
         max_retries=max_retries,
     )
-    return response
 
 
 def request_etag(url: str, use_auth_token: Optional[Union[str, bool]] = None) -> Optional[str]:
@@ -429,8 +430,7 @@ def request_etag(url: str, use_auth_token: Optional[Union[str, bool]] = None) ->
     headers = get_authentication_headers_for_url(url, use_auth_token=use_auth_token)
     response = http_head(url, headers=headers, max_retries=3)
     response.raise_for_status()
-    etag = response.headers.get("ETag") if response.ok else None
-    return etag
+    return response.headers.get("ETag") if response.ok else None
 
 
 def get_from_cache(
@@ -469,12 +469,7 @@ def get_from_cache(
 
     os.makedirs(cache_dir, exist_ok=True)
 
-    if ignore_url_params:
-        # strip all query parameters and #fragments from the URL
-        cached_url = urljoin(url, urlparse(url).path)
-    else:
-        cached_url = url  # additional parameters may be added to the given URL
-
+    cached_url = urljoin(url, urlparse(url).path) if ignore_url_params else url
     connected = False
     response = None
     cookies = None
@@ -519,13 +514,12 @@ def get_from_cache(
                 for k, v in response.cookies.items():
                     # In some edge cases, we need to get a confirmation token
                     if k.startswith("download_warning") and "drive.google.com" in url:
-                        url += "&confirm=" + v
+                        url += f"&confirm={v}"
                         cookies = response.cookies
                 connected = True
                 # Fix Google Drive URL to avoid Virus scan warning
                 if "drive.google.com" in url and "confirm=" not in url:
                     url += "&confirm=t"
-            # In some edge cases, head request returns 400 but the connection is actually ok
             elif (
                 (response.status_code == 400 and "firebasestorage.googleapis.com" in url)
                 or (response.status_code == 405 and "drive.google.com" in url)
@@ -547,8 +541,6 @@ def get_from_cache(
         except (OSError, requests.exceptions.Timeout) as e:
             # not connected
             head_error = e
-            pass
-
     # connected == False = we don't have a connection, or url doesn't exist, or is otherwise inaccessible.
     # try to get the last downloaded one
     if not connected:
@@ -578,10 +570,10 @@ def get_from_cache(
 
     # From now on, connected is True.
     # Prevent parallel downloads of the same file with a lock.
-    lock_path = cache_path + ".lock"
+    lock_path = f"{cache_path}.lock"
     with FileLock(lock_path):
         if resume_download:
-            incomplete_path = cache_path + ".incomplete"
+            incomplete_path = f"{cache_path}.incomplete"
 
             @contextmanager
             def _resumable_file_manager():
@@ -624,7 +616,7 @@ def get_from_cache(
 
         logger.info(f"creating metadata file for {cache_path}")
         meta = {"url": url, "etag": etag}
-        meta_path = cache_path + ".json"
+        meta_path = f"{cache_path}.json"
         with open(meta_path, "w", encoding="utf-8") as meta_file:
             json.dump(meta, meta_file)
 

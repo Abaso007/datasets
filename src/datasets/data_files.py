@@ -204,10 +204,14 @@ def _is_unrequested_hidden_file_or_is_inside_unrequested_hidden_dir(matched_rel_
     # Since we assume that the path matches the pattern, it's equivalent to counting that both
     # the path and the pattern have the same number of hidden parts.
     hidden_directories_in_path = [
-        part for part in PurePath(matched_rel_path).parts if part.startswith(".") and not set(part) == {"."}
+        part
+        for part in PurePath(matched_rel_path).parts
+        if part.startswith(".") and set(part) != {"."}
     ]
     hidden_directories_in_pattern = [
-        part for part in PurePath(pattern).parts if part.startswith(".") and not set(part) == {"."}
+        part
+        for part in PurePath(pattern).parts
+        if part.startswith(".") and set(part) != {"."}
     ]
     return len(hidden_directories_in_path) != len(hidden_directories_in_pattern)
 
@@ -359,9 +363,13 @@ def resolve_patterns_locally_or_by_urls(
         if is_remote_url(pattern):
             data_files.append(Url(pattern))
         else:
-            for path in _resolve_single_pattern_locally(base_path, pattern, allowed_extensions):
-                data_files.append(path)
-
+            data_files.extend(
+                iter(
+                    _resolve_single_pattern_locally(
+                        base_path, pattern, allowed_extensions
+                    )
+                )
+            )
     if not data_files:
         error_msg = f"Unable to resolve any data file that matches '{patterns}' at {Path(base_path).resolve()}"
         if allowed_extensions is not None:
@@ -572,10 +580,18 @@ def resolve_patterns_in_dataset_repository(
     """
     data_files_urls: List[Url] = []
     for pattern in patterns:
-        for rel_path in _resolve_single_pattern_in_dataset_repository(
-            dataset_info, pattern, base_path, allowed_extensions
-        ):
-            data_files_urls.append(Url(hf_hub_url(dataset_info.id, rel_path.as_posix(), revision=dataset_info.sha)))
+        data_files_urls.extend(
+            Url(
+                hf_hub_url(
+                    dataset_info.id,
+                    rel_path.as_posix(),
+                    revision=dataset_info.sha,
+                )
+            )
+            for rel_path in _resolve_single_pattern_in_dataset_repository(
+                dataset_info, pattern, base_path, allowed_extensions
+            )
+        )
     if not data_files_urls:
         error_msg = f"Unable to resolve any data file that matches {patterns} in dataset repository {dataset_info.id}"
         if allowed_extensions is not None:
@@ -793,14 +809,14 @@ class DataFilesDict(Dict[str, DataFilesList]):
         out = cls()
         for key, patterns_for_key in patterns.items():
             out[key] = (
-                DataFilesList.from_local_or_remote(
+                patterns_for_key
+                if isinstance(patterns_for_key, DataFilesList)
+                else DataFilesList.from_local_or_remote(
                     patterns_for_key,
                     base_path=base_path,
                     allowed_extensions=allowed_extensions,
                     use_auth_token=use_auth_token,
                 )
-                if not isinstance(patterns_for_key, DataFilesList)
-                else patterns_for_key
             )
         return out
 
@@ -815,14 +831,14 @@ class DataFilesDict(Dict[str, DataFilesList]):
         out = cls()
         for key, patterns_for_key in patterns.items():
             out[key] = (
-                DataFilesList.from_hf_repo(
+                patterns_for_key
+                if isinstance(patterns_for_key, DataFilesList)
+                else DataFilesList.from_hf_repo(
                     patterns_for_key,
                     dataset_info=dataset_info,
                     base_path=base_path,
                     allowed_extensions=allowed_extensions,
                 )
-                if not isinstance(patterns_for_key, DataFilesList)
-                else patterns_for_key
             )
         return out
 

@@ -131,7 +131,7 @@ def test_buffer_shuffled_examples_iterable(seed):
     # We create a buffer and we pick random examples from it.
     buffer, rest = all_examples[:buffer_size], all_examples[buffer_size:]
     expected = []
-    for i, index_to_pick in enumerate(expected_indices_used_for_shuffling):
+    for index_to_pick in expected_indices_used_for_shuffling:
         expected.append(buffer[index_to_pick])
         # The picked examples are directly replaced by the next examples from the iterable.
         buffer[index_to_pick] = rest.pop(0)
@@ -355,7 +355,7 @@ def test_mapped_examples_iterable_remove_columns(n, func, batched, batch_size, r
             transformed_batch = func(batch)
             all_transformed_examples.extend(_batch_to_examples(transformed_batch))
         expected = {k: v for k, v in _examples_to_batch(all_examples).items() if k not in columns_to_remove}
-        expected.update(_examples_to_batch(all_transformed_examples))
+        expected |= _examples_to_batch(all_transformed_examples)
         expected = list(_batch_to_examples(expected))
     assert next(iter(ex_iterable))[1] == expected[0]
     assert [x for _, x in ex_iterable] == expected
@@ -730,11 +730,12 @@ def test_iterable_dataset_iter_batch(batch_size, drop_last_batch):
     n = 25
     dataset = IterableDataset(ExamplesIterable(generate_examples_fn, {"n": n}))
     all_examples = [ex for _, ex in generate_examples_fn(n=n)]
-    expected = []
-    for i in range(0, len(all_examples), batch_size):
-        if len(all_examples[i : i + batch_size]) < batch_size and drop_last_batch:
-            continue
-        expected.append(_examples_to_batch(all_examples[i : i + batch_size]))
+    expected = [
+        _examples_to_batch(all_examples[i : i + batch_size])
+        for i in range(0, len(all_examples), batch_size)
+        if len(all_examples[i : i + batch_size]) >= batch_size
+        or not drop_last_batch
+    ]
     assert next(iter(dataset.iter(batch_size, drop_last_batch=drop_last_batch))) == expected[0]
     assert list(dataset.iter(batch_size, drop_last_batch=drop_last_batch)) == expected
 
@@ -1010,7 +1011,8 @@ def test_iterable_dataset_remove_columns(dataset_with_several_columns):
     assert new_dataset.features is None
     new_dataset = dataset_with_several_columns.remove_columns(["id", "filepath"])
     assert list(new_dataset) == [
-        {k: v for k, v in example.items() if k != "id" and k != "filepath"} for example in dataset_with_several_columns
+        {k: v for k, v in example.items() if k not in ["id", "filepath"]}
+        for example in dataset_with_several_columns
     ]
     assert new_dataset.features is None
     assert new_dataset.column_names is None

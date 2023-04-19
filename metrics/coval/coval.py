@@ -170,8 +170,6 @@ def get_coref_infos(
     key_doc_lines = {doc: key_lines}
     sys_doc_lines = {doc: sys_lines}
 
-    doc_coref_infos = {}
-
     key_nested_coref_num = 0
     sys_nested_coref_num = 0
     key_removed_nested_clusters = 0
@@ -203,8 +201,14 @@ def get_coref_infos(
     sys_mention_key_cluster = reader.get_mention_assignments(sys_clusters, key_clusters)
     key_mention_sys_cluster = reader.get_mention_assignments(key_clusters, sys_clusters)
 
-    doc_coref_infos[doc] = (key_clusters, sys_clusters, key_mention_sys_cluster, sys_mention_key_cluster)
-
+    doc_coref_infos = {
+        doc: (
+            key_clusters,
+            sys_clusters,
+            key_mention_sys_cluster,
+            sys_mention_key_cluster,
+        )
+    }
     if remove_nested:
         logger.info(
             "Number of removed nested coreferring mentions in the key "
@@ -236,7 +240,11 @@ def evaluate(key_lines, sys_lines, metrics, NP_only, remove_nested, keep_singlet
         if name in ["muc", "bcub", "ceafe"]:
             conll += f1
             conll_subparts_num += 1
-        output_scores.update({f"{name}/recall": recall, f"{name}/precision": precision, f"{name}/f1": f1})
+        output_scores |= {
+            f"{name}/recall": recall,
+            f"{name}/precision": precision,
+            f"{name}/f1": f1,
+        }
 
         logger.info(
             name.ljust(10),
@@ -248,7 +256,7 @@ def evaluate(key_lines, sys_lines, metrics, NP_only, remove_nested, keep_singlet
     if conll_subparts_num == 3:
         conll = (conll / 3) * 100
         logger.info(f"CoNLL score: {conll:.2f}")
-        output_scores.update({"conll_score": conll})
+        output_scores["conll_score"] = conll
 
     return output_scores
 
@@ -256,14 +264,11 @@ def evaluate(key_lines, sys_lines, metrics, NP_only, remove_nested, keep_singlet
 def check_gold_parse_annotation(key_lines):
     has_gold_parse = False
     for line in key_lines:
-        if not line.startswith("#"):
-            if len(line.split()) > 6:
-                parse_col = line.split()[5]
-                if not parse_col == "-":
-                    has_gold_parse = True
-                    break
-                else:
-                    break
+        if not line.startswith("#") and len(line.split()) > 6:
+            parse_col = line.split()[5]
+            if parse_col != "-":
+                has_gold_parse = True
+            break
     return has_gold_parse
 
 
@@ -306,7 +311,7 @@ class Coval(datasets.Metric):
                 # util.parse_key_file(key_file)
                 # key_file = key_file + ".parsed"
 
-        score = evaluate(
+        return evaluate(
             key_lines=references,
             sys_lines=predictions,
             metrics=allmetrics,
@@ -315,5 +320,3 @@ class Coval(datasets.Metric):
             keep_singletons=keep_singletons,
             min_span=min_span,
         )
-
-        return score

@@ -54,11 +54,9 @@ def data_files_with_labels_no_metadata(tmp_path, auto_text_file):
     filename2 = subdir_class_1 / "file1.txt"
     shutil.copyfile(auto_text_file, filename2)
 
-    data_files_with_labels_no_metadata = DataFilesDict.from_local_or_remote(
+    return DataFilesDict.from_local_or_remote(
         get_data_patterns_locally(str(data_dir)), str(data_dir)
     )
-
-    return data_files_with_labels_no_metadata
 
 
 @pytest.fixture
@@ -75,11 +73,9 @@ def data_files_with_different_levels_no_metadata(tmp_path, auto_text_file):
     filename2 = subdir_class_1 / "file1.txt"
     shutil.copyfile(auto_text_file, filename2)
 
-    data_files_with_different_levels = DataFilesDict.from_local_or_remote(
+    return DataFilesDict.from_local_or_remote(
         get_data_patterns_locally(str(data_dir)), str(data_dir)
     )
-
-    return data_files_with_different_levels
 
 
 @pytest.fixture
@@ -93,11 +89,9 @@ def data_files_with_one_label_no_metadata(tmp_path, auto_text_file):
     filename2 = data_dir / "file1.txt"
     shutil.copyfile(auto_text_file, filename2)
 
-    data_files_with_one_label = DataFilesDict.from_local_or_remote(
+    return DataFilesDict.from_local_or_remote(
         get_data_patterns_locally(str(data_dir)), str(data_dir)
     )
-
-    return data_files_with_one_label
 
 
 @pytest.fixture
@@ -317,15 +311,15 @@ def test_generate_examples_duplicated_label_key(
         assert autofolder.info.features["label"] == ClassLabel(names=["class0", "class1"])
         assert all(example["label"] in ["class0", "class1"] for _, example in generator)
 
+    elif drop_metadata is True:
+        # drop both labels and metadata
+        assert autofolder.info.features == Features({"base": None})
+        assert all(example.keys() == {"base"} for _, example in generator)
+
     else:
-        if drop_metadata is not True:
-            # labels are from metadata
-            assert autofolder.info.features["label"] == Value("string")
-            assert all(example["label"] in ["CLASS_0", "CLASS_1"] for _, example in generator)
-        else:
-            # drop both labels and metadata
-            assert autofolder.info.features == Features({"base": None})
-            assert all(example.keys() == {"base"} for _, example in generator)
+        # labels are from metadata
+        assert autofolder.info.features["label"] == Value("string")
+        assert all(example["label"] in ["CLASS_0", "CLASS_1"] for _, example in generator)
 
 
 @pytest.mark.parametrize("drop_metadata", [None, True, False])
@@ -433,10 +427,11 @@ def test_data_files_with_metadata_that_misses_one_sample(
     files_with_metadata_that_misses_one_sample, drop_metadata, cache_dir
 ):
     file, file2, metadata_file = files_with_metadata_that_misses_one_sample
-    if not drop_metadata:
-        features = Features({"base": None, "additional_feature": Value("string")})
-    else:
-        features = Features({"base": None})
+    features = (
+        Features({"base": None})
+        if drop_metadata
+        else Features({"base": None, "additional_feature": Value("string")})
+    )
     autofolder = DummyFolderBasedBuilder(
         data_files=[file, file2, metadata_file],
         drop_metadata=drop_metadata,

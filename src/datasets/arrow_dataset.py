@@ -610,7 +610,7 @@ def _check_table(table) -> Table:
 def _check_column_names(column_names: List[str]):
     """Check the column names to make sure they don't contain duplicates."""
     counter = Counter(column_names)
-    if not all(count == 1 for count in counter.values()):
+    if any(count != 1 for count in counter.values()):
         duplicated_columns = [col for col in counter if counter[col] > 1]
         raise ValueError(f"The table can't have duplicated columns but columns {duplicated_columns} are duplicated.")
 
@@ -688,11 +688,12 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 f"External features info don't match the dataset:\nGot\n{self.info.features}\nwith type\n{self.info.features.type}\n\nbut expected something like\n{inferred_features}\nwith type\n{inferred_features.type}"
             )
 
-        if self._indices is not None:
-            if not pa.types.is_unsigned_integer(self._indices.column(0).type):
-                raise ValueError(
-                    f"indices must be an Arrow table of unsigned integers, current type is {self._indices.column(0).type}"
-                )
+        if self._indices is not None and not pa.types.is_unsigned_integer(
+            self._indices.column(0).type
+        ):
+            raise ValueError(
+                f"indices must be an Arrow table of unsigned integers, current type is {self._indices.column(0).type}"
+            )
         _check_column_names(self._data.column_names)
 
         self._data = update_metadata_with_features(self._data, self._info.features)
@@ -1399,7 +1400,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 json.dumps(state["_format_kwargs"][k])
             except TypeError as e:
                 raise TypeError(
-                    str(e) + f"\nThe format kwargs must be JSON serializable, but key '{k}' isn't."
+                    f"{str(e)}\nThe format kwargs must be JSON serializable, but key '{k}' isn't."
                 ) from None
         # Get json serializable dataset info
         dataset_info = asdict(self._info)
@@ -1707,9 +1708,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         1066
         ```
         """
-        if self._indices is not None:
-            return self._indices.num_rows
-        return self._data.num_rows
+        return self._data.num_rows if self._indices is None else self._indices.num_rows
 
     @property
     def column_names(self) -> List[str]:
@@ -2290,14 +2289,13 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             for pa_subtable in table_iter(self.data, batch_size=batch_size):
                 for i in range(pa_subtable.num_rows):
                     pa_subtable_ex = pa_subtable.slice(i, 1)
-                    formatted_output = format_table(
+                    yield format_table(
                         pa_subtable_ex,
                         0,
                         formatter=formatter,
                         format_columns=self._format_columns,
                         output_all_columns=self._output_all_columns,
                     )
-                    yield formatted_output
         else:
             for i in range(self.num_rows):
                 yield self._getitem(
@@ -2321,16 +2319,19 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             format_kwargs = self._format_kwargs if self._format_kwargs is not None else {}
             formatter = get_formatter(self._format_type, features=self._info.features, **format_kwargs)
             for pa_subtable in table_iter(self.data, batch_size=batch_size, drop_last_batch=drop_last_batch):
-                formatted_batch = format_table(
+                yield format_table(
                     pa_subtable,
                     range(pa_subtable.num_rows),
                     formatter=formatter,
                     format_columns=self._format_columns,
                     output_all_columns=self._output_all_columns,
                 )
-                yield formatted_batch
         else:
-            num_rows = self.num_rows if not drop_last_batch else self.num_rows // batch_size * batch_size
+            num_rows = (
+                self.num_rows // batch_size * batch_size
+                if drop_last_batch
+                else self.num_rows
+            )
             for i in range(0, num_rows, batch_size):
                 yield self._getitem(
                     slice(i, i + batch_size),
@@ -2427,7 +2428,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         'output_all_columns': False}
         ```
         """
-        format_kwargs.update(format_kwargs.pop("format_kwargs", {}))  # allow to use self.set_format(self.format)
+        format_kwargs |= format_kwargs.pop("format_kwargs", {})
 
         # Check that the format_type and format_kwargs are valid and make it possible to have a Formatter
         type = get_format_type_from_alias(type)
@@ -2682,19 +2683,20 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         """
         Can be used to index columns (by string names) or rows (by integer index, slices, or iter of indices or bools)
         """
-        format_type = kwargs["format_type"] if "format_type" in kwargs else self._format_type
-        format_columns = kwargs["format_columns"] if "format_columns" in kwargs else self._format_columns
-        output_all_columns = (
-            kwargs["output_all_columns"] if "output_all_columns" in kwargs else self._output_all_columns
-        )
-        format_kwargs = kwargs["format_kwargs"] if "format_kwargs" in kwargs else self._format_kwargs
+        format_type = kwargs.get("format_type", self._format_type)
+        format_columns = kwargs.get("format_columns", self._format_columns)
+        output_all_columns = kwargs.get("output_all_columns", self._output_all_columns)
+        format_kwargs = kwargs.get("format_kwargs", self._format_kwargs)
         format_kwargs = format_kwargs if format_kwargs is not None else {}
         formatter = get_formatter(format_type, features=self._info.features, **format_kwargs)
         pa_subtable = query_table(self._data, key, indices=self._indices if self._indices is not None else None)
-        formatted_output = format_table(
-            pa_subtable, key, formatter=formatter, format_columns=format_columns, output_all_columns=output_all_columns
+        return format_table(
+            pa_subtable,
+            key,
+            formatter=formatter,
+            format_columns=format_columns,
+            output_all_columns=output_all_columns,
         )
-        return formatted_output
 
     @overload
     def __getitem__(self, key: Union[int, slice, Iterable[int]]) -> Dict:  # noqa: F811
@@ -2758,8 +2760,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         else:
             cache_file_name = "cache-" + generate_random_fingerprint() + ".arrow"
             cache_directory = get_temporary_cache_files_directory()
-        cache_file_path = os.path.join(cache_directory, cache_file_name)
-        return cache_file_path
+        return os.path.join(cache_directory, cache_file_name)
 
     @transmit_tasks
     @transmit_format
@@ -2897,11 +2898,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                     split=self.split,
                     fingerprint=new_fingerprint,
                 )
-            if remove_columns:
-                return self.remove_columns(remove_columns)
-            else:
-                return self
-
+            return self.remove_columns(remove_columns) if remove_columns else self
         if function is None:
             function = lambda x: x  # noqa: E731
 
@@ -2962,21 +2959,23 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             validate_fingerprint(new_fingerprint)
         dataset_kwargs["new_fingerprint"] = new_fingerprint
 
-        if self.cache_files:
-            if cache_file_name is None:
-                cache_file_name = self._get_cache_file_path(new_fingerprint)
+        if self.cache_files and cache_file_name is None:
+            cache_file_name = self._get_cache_file_path(new_fingerprint)
         dataset_kwargs["cache_file_name"] = cache_file_name
 
         def load_processed_shard_from_cache(shard_kwargs):
             """Load a processed shard from cache if it exists, otherwise throw an error."""
             shard = shard_kwargs["shard"]
             # Check if we've already cached this computation (indexed by a hash)
-            if shard_kwargs["cache_file_name"] is not None:
-                if os.path.exists(shard_kwargs["cache_file_name"]) and load_from_cache_file:
-                    info = shard.info.copy()
-                    info.features = features
-                    info.task_templates = None
-                    return Dataset.from_file(shard_kwargs["cache_file_name"], info=info, split=shard.split)
+            if (
+                shard_kwargs["cache_file_name"] is not None
+                and os.path.exists(shard_kwargs["cache_file_name"])
+                and load_from_cache_file
+            ):
+                info = shard.info.copy()
+                info.features = features
+                info.task_templates = None
+                return Dataset.from_file(shard_kwargs["cache_file_name"], info=info, split=shard.split)
             raise NonExistentDatasetError
 
         num_shards = num_proc if num_proc is not None else 1
@@ -2988,11 +2987,9 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         shards_done = 0
         if num_proc is None or num_proc == 1:
             transformed_dataset = None
-            try:
+            with contextlib.suppress(NonExistentDatasetError):
                 transformed_dataset = load_processed_shard_from_cache(dataset_kwargs)
                 logger.warning(f"Loading cached processed dataset at {dataset_kwargs['cache_file_name']}")
-            except NonExistentDatasetError:
-                pass
             if transformed_dataset is None:
                 with logging.tqdm(
                     disable=not logging.is_progress_bar_enabled(),
@@ -3034,7 +3031,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 return cache_file_name
 
             def format_new_fingerprint(new_fingerprint: str, rank: int) -> str:
-                new_fingerprint = new_fingerprint + suffix_template.format(rank=rank, num_proc=num_proc)
+                new_fingerprint += suffix_template.format(rank=rank, num_proc=num_proc)
                 validate_fingerprint(new_fingerprint)
                 return new_fingerprint
 
@@ -3070,12 +3067,9 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
             transformed_shards = [None] * num_shards
             for rank in range(num_shards):
-                try:
+                with contextlib.suppress(NonExistentDatasetError):
                     transformed_shards[rank] = load_processed_shard_from_cache(kwargs_per_job[rank])
                     kwargs_per_job[rank] = None
-                except NonExistentDatasetError:
-                    pass
-
             kwargs_per_job = [kwargs for kwargs in kwargs_per_job if kwargs is not None]
 
             # We try to create a pool with as many workers as dataset not yet cached.
@@ -3234,7 +3228,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 all_dict_values_are_lists = all(
                     isinstance(value, allowed_batch_return_types) for value in processed_inputs.values()
                 )
-                if all_dict_values_are_lists is False:
+                if not all_dict_values_are_lists:
                     raise TypeError(
                         f"Provided `function` which is applied to all elements of table returns a `dict` of types {[type(x) for x in processed_inputs.values()]}. When using `batched=True`, make sure provided `function` returns a `dict` of types like `{allowed_batch_return_types}`."
                     )
@@ -3244,7 +3238,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             nonlocal update_data
             inputs = format_table(
                 pa_inputs,
-                0 if not batched else range(pa_inputs.num_rows),
+                range(pa_inputs.num_rows) if batched else 0,
                 format_columns=input_columns,
                 formatter=input_formatter,
             )
@@ -3347,7 +3341,11 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 if not batched:
                     shard_iterable = enumerate(arrow_formatted_shard)
                 else:
-                    num_rows = len(shard) if not drop_last_batch else len(shard) // batch_size * batch_size
+                    num_rows = (
+                        len(shard) // batch_size * batch_size
+                        if drop_last_batch
+                        else len(shard)
+                    )
                     shard_iterable = zip(
                         range(0, num_rows, batch_size),
                         arrow_formatted_shard.iter(batch_size, drop_last_batch=drop_last_batch),
@@ -3842,13 +3840,12 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
         indices = indices if isinstance(indices, list) else list(indices)
 
-        size = len(self)
-        if indices:
-            _check_valid_indices_value(int(max(indices)), size=size)
-            _check_valid_indices_value(int(min(indices)), size=size)
-        else:
+        if not indices:
             return self._select_contiguous(0, 0, new_fingerprint=new_fingerprint)
 
+        size = len(self)
+        _check_valid_indices_value(int(max(indices)), size=size)
+        _check_valid_indices_value(int(min(indices)), size=size)
         indices_array = pa.array(indices, type=pa.uint64())
         # Check if we need to convert indices
         if self._indices is not None:
@@ -3968,14 +3965,13 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             column_names = [column_names]
 
         # Check proper format and length of reverse
-        if not isinstance(reverse, bool):
-            if len(reverse) != len(column_names):
-                raise ValueError(
-                    "Parameter 'reverse' should be either a boolean or a list of booleans with the same length as 'column_names'."
-                )
-        else:
+        if isinstance(reverse, bool):
             reverse = [reverse] * len(column_names)
 
+        elif len(reverse) != len(column_names):
+            raise ValueError(
+                "Parameter 'reverse' should be either a boolean or a list of booleans with the same length as 'column_names'."
+            )
         # Check whether column name(s) exist in dataset
         for column in column_names:
             if not isinstance(column, str) or column not in self._data.column_names:
@@ -4014,7 +4010,8 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         )
 
         sort_keys = [
-            (col, "ascending" if not col_reverse else "descending") for col, col_reverse in zip(column_names, reverse)
+            (col, "descending" if col_reverse else "ascending")
+            for col, col_reverse in zip(column_names, reverse)
         ]
 
         indices = pc.sort_indices(sort_table, sort_keys=sort_keys, null_placement=null_placement)
@@ -4154,7 +4151,9 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         return self.select(
             indices=permutation,
             keep_in_memory=keep_in_memory,
-            indices_cache_file_name=indices_cache_file_name if not keep_in_memory else None,
+            indices_cache_file_name=None
+            if keep_in_memory
+            else indices_cache_file_name,
             writer_batch_size=writer_batch_size,
             new_fingerprint=new_fingerprint,
         )
@@ -4354,7 +4353,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
         load_from_cache_file = load_from_cache_file if load_from_cache_file is not None else is_caching_enabled()
 
-        if generator is None and shuffle is True:
+        if generator is None and shuffle:
             if seed is None:
                 _, seed, pos, *_ = np.random.get_state()
                 seed = seed[pos] if pos < 624 else seed[0]
@@ -4363,13 +4362,12 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
         # Check if we've already cached this computation (indexed by a hash)
         if self.cache_files:
-            if train_indices_cache_file_name is None or test_indices_cache_file_name is None:
-                # we create a unique hash from the function, current dataset file and the mapping args
+            # we create a unique hash from the function, current dataset file and the mapping args
 
-                if train_indices_cache_file_name is None:
-                    train_indices_cache_file_name = self._get_cache_file_path(train_new_fingerprint)
-                if test_indices_cache_file_name is None:
-                    test_indices_cache_file_name = self._get_cache_file_path(test_new_fingerprint)
+            if train_indices_cache_file_name is None:
+                train_indices_cache_file_name = self._get_cache_file_path(train_new_fingerprint)
+            if test_indices_cache_file_name is None:
+                test_indices_cache_file_name = self._get_cache_file_path(test_new_fingerprint)
             if (
                 os.path.exists(train_indices_cache_file_name)
                 and os.path.exists(test_indices_cache_file_name)
@@ -4393,37 +4391,34 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 raise ValueError("Stratified train/test split is not implemented for `shuffle=False`")
             train_indices = np.arange(n_train)
             test_indices = np.arange(n_train, n_train + n_test)
-        else:
-            # stratified partition
-            if stratify_by_column is not None:
-                if stratify_by_column not in self._info.features.keys():
-                    raise ValueError(f"Key {stratify_by_column} not found in {self._info.features.keys()}")
-                if not isinstance(self._info.features[stratify_by_column], ClassLabel):
-                    raise ValueError(
-                        f"Stratifying by column is only supported for {ClassLabel.__name__} column, and column {stratify_by_column} is {type(self._info.features[stratify_by_column]).__name__}."
-                    )
-                try:
-                    train_indices, test_indices = next(
-                        stratified_shuffle_split_generate_indices(
-                            self.with_format("numpy")[stratify_by_column], n_train, n_test, rng=generator
-                        )
-                    )
-                except Exception as error:
-                    if str(error) == "Minimum class count error":
-                        raise ValueError(
-                            f"The least populated class in {stratify_by_column} column has only 1"
-                            " member, which is too few. The minimum"
-                            " number of groups for any class cannot"
-                            " be less than 2."
-                        )
-                    else:
-                        raise error
+        elif stratify_by_column is None:
+            permutation = generator.permutation(len(self))
+            test_indices = permutation[:n_test]
+            train_indices = permutation[n_test : (n_test + n_train)]
 
-            # random partition
-            else:
-                permutation = generator.permutation(len(self))
-                test_indices = permutation[:n_test]
-                train_indices = permutation[n_test : (n_test + n_train)]
+        else:
+            if stratify_by_column not in self._info.features.keys():
+                raise ValueError(f"Key {stratify_by_column} not found in {self._info.features.keys()}")
+            if not isinstance(self._info.features[stratify_by_column], ClassLabel):
+                raise ValueError(
+                    f"Stratifying by column is only supported for {ClassLabel.__name__} column, and column {stratify_by_column} is {type(self._info.features[stratify_by_column]).__name__}."
+                )
+            try:
+                train_indices, test_indices = next(
+                    stratified_shuffle_split_generate_indices(
+                        self.with_format("numpy")[stratify_by_column], n_train, n_test, rng=generator
+                    )
+                )
+            except Exception as error:
+                if str(error) == "Minimum class count error":
+                    raise ValueError(
+                        f"The least populated class in {stratify_by_column} column has only 1"
+                        " member, which is too few. The minimum"
+                        " number of groups for any class cannot"
+                        " be less than 2."
+                    )
+                else:
+                    raise error
 
         train_split = self.select(
             indices=train_indices,
@@ -4503,8 +4498,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         if not 0 <= index < num_shards:
             raise ValueError("index should be in [0, num_shards-1]")
         if contiguous:
-            div = len(self) // num_shards
-            mod = len(self) % num_shards
+            div, mod = divmod(len(self), num_shards)
             start = div * index + min(index, mod)
             end = start + div + (1 if index < mod else 0)
             indices = range(start, end)
@@ -4693,16 +4687,15 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 key=slice(0, len(self)),
                 indices=self._indices if self._indices is not None else None,
             ).to_pydict()
-        else:
-            batch_size = batch_size if batch_size else config.DEFAULT_MAX_BATCH_SIZE
-            return (
-                query_table(
-                    table=self._data,
-                    key=slice(offset, offset + batch_size),
-                    indices=self._indices if self._indices is not None else None,
-                ).to_pydict()
-                for offset in range(0, len(self), batch_size)
-            )
+        batch_size = batch_size if batch_size else config.DEFAULT_MAX_BATCH_SIZE
+        return (
+            query_table(
+                table=self._data,
+                key=slice(offset, offset + batch_size),
+                indices=self._indices if self._indices is not None else None,
+            ).to_pydict()
+            for offset in range(0, len(self), batch_size)
+        )
 
     def to_list(self) -> list:
         """Returns the dataset as a Python list.
@@ -4795,16 +4788,15 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 key=slice(0, len(self)),
                 indices=self._indices if self._indices is not None else None,
             ).to_pandas(types_mapper=pandas_types_mapper)
-        else:
-            batch_size = batch_size if batch_size else config.DEFAULT_MAX_BATCH_SIZE
-            return (
-                query_table(
-                    table=self._data,
-                    key=slice(offset, offset + batch_size),
-                    indices=self._indices if self._indices is not None else None,
-                ).to_pandas(types_mapper=pandas_types_mapper)
-                for offset in range(0, len(self), batch_size)
-            )
+        batch_size = batch_size if batch_size else config.DEFAULT_MAX_BATCH_SIZE
+        return (
+            query_table(
+                table=self._data,
+                key=slice(offset, offset + batch_size),
+                indices=self._indices if self._indices is not None else None,
+            ).to_pandas(types_mapper=pandas_types_mapper)
+            for offset in range(0, len(self), batch_size)
+        )
 
     def to_parquet(
         self,
@@ -5172,8 +5164,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                         batch_size=1000,
                         keep_in_memory=True,
                     )
-                    shard = shard.with_format(**format)
-                    yield shard
+                    yield shard.with_format(**format)
 
             shards = shards_with_embedded_external_files(shards)
 

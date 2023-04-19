@@ -249,7 +249,7 @@ class ModuleFactoryTest(TestCase):
         self.cache_dir = tempfile.mkdtemp()
         self.download_config = DownloadConfig(cache_dir=self.cache_dir)
         self.dynamic_modules_path = datasets.load.init_dynamic_modules(
-            name="test_datasets_modules_" + os.path.basename(self.hf_modules_cache),
+            name=f"test_datasets_modules_{os.path.basename(self.hf_modules_cache)}",
             hf_modules_cache=self.hf_modules_cache,
         )
 
@@ -514,7 +514,7 @@ class LoadTest(TestCase):
         assert dummy_module_name.startswith("__")
         module_dir = os.path.join(modules_dir, dummy_module_name)
         os.makedirs(module_dir, exist_ok=True)
-        module_path = os.path.join(module_dir, dummy_module_name + ".py")
+        module_path = os.path.join(module_dir, f"{dummy_module_name}.py")
         with open(module_path, "w") as f:
             f.write(dummy_code)
         return module_dir
@@ -633,7 +633,10 @@ def test_load_dataset_builder_for_relative_script_dir(dataset_loading_script_dir
 
 def test_load_dataset_builder_for_script_path(dataset_loading_script_dir, data_dir):
     builder = datasets.load_dataset_builder(
-        os.path.join(dataset_loading_script_dir, DATASET_LOADING_SCRIPT_NAME + ".py"), data_dir=data_dir
+        os.path.join(
+            dataset_loading_script_dir, f"{DATASET_LOADING_SCRIPT_NAME}.py"
+        ),
+        data_dir=data_dir,
     )
     assert isinstance(builder, DatasetBuilder)
     assert builder.name == DATASET_LOADING_SCRIPT_NAME
@@ -736,7 +739,7 @@ def test_load_dataset_streaming_compressed_files(path):
     repo_id = "albertvillanova/datasets-tests-compression"
     data_files = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{path}"
     if data_files[-3:] in ("zip", "tar"):  # we need to glob "*" inside archives
-        data_files = data_files[-3:] + "://*::" + data_files
+        data_files = f"{data_files[-3:]}://*::{data_files}"
         return  # TODO(QL, albert): support re-add support for ZIP and TAR archives streaming
     ds = load_dataset("json", split="train", data_files=data_files, streaming=True)
     assert isinstance(ds, IterableDataset)
@@ -925,13 +928,12 @@ def test_load_dataset_readonly(dataset_loading_script_dir, dataset_loading_scrip
 def test_load_dataset_local_with_default_in_memory(
     max_in_memory_dataset_size, dataset_loading_script_dir, data_dir, monkeypatch
 ):
-    current_dataset_size = 148
     if max_in_memory_dataset_size == "default":
         max_in_memory_dataset_size = 0  # default
     else:
         monkeypatch.setattr(datasets.config, "IN_MEMORY_MAX_SIZE", max_in_memory_dataset_size)
     if max_in_memory_dataset_size:
-        expected_in_memory = current_dataset_size < max_in_memory_dataset_size
+        expected_in_memory = max_in_memory_dataset_size > 148
     else:
         expected_in_memory = False
 
@@ -944,13 +946,12 @@ def test_load_dataset_local_with_default_in_memory(
 def test_load_from_disk_with_default_in_memory(
     max_in_memory_dataset_size, dataset_loading_script_dir, data_dir, tmp_path, monkeypatch
 ):
-    current_dataset_size = 512  # arrow file size = 512, in-memory dataset size = 148
     if max_in_memory_dataset_size == "default":
         max_in_memory_dataset_size = 0  # default
     else:
         monkeypatch.setattr(datasets.config, "IN_MEMORY_MAX_SIZE", max_in_memory_dataset_size)
     if max_in_memory_dataset_size:
-        expected_in_memory = current_dataset_size < max_in_memory_dataset_size
+        expected_in_memory = max_in_memory_dataset_size > 512
     else:
         expected_in_memory = False
 
@@ -986,14 +987,17 @@ def test_load_dataset_deletes_extracted_files(deleted, jsonl_gz_path, tmp_path):
         ds = load_dataset("json", split="train", data_files=data_files, cache_dir=cache_dir)
     assert ds[0] == {"col_1": "0", "col_2": 0, "col_3": 0.0}
     assert (
-        [path for path in (cache_dir / "downloads" / "extracted").iterdir() if path.suffix != ".lock"] == []
+        not [
+            path
+            for path in (cache_dir / "downloads" / "extracted").iterdir()
+            if path.suffix != ".lock"
+        ]
     ) is deleted
 
 
 def distributed_load_dataset(args):
     data_name, tmp_dir, datafiles = args
-    dataset = load_dataset(data_name, cache_dir=tmp_dir, data_files=datafiles)
-    return dataset
+    return load_dataset(data_name, cache_dir=tmp_dir, data_files=datafiles)
 
 
 def test_load_dataset_distributed(tmp_path, csv_path):

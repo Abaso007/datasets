@@ -63,10 +63,7 @@ class HasNextIterator(Iterator):
         return self
 
     def __next__(self):
-        if self._hasnext:
-            result = self._thenext
-        else:
-            result = next(self.it)
+        result = self._thenext if self._hasnext else next(self.it)
         self._hasnext = None
         return result
 
@@ -296,7 +293,7 @@ class VerticallyConcatenatedMultiSourcesExamplesIterable(_BaseExamplesIterable):
 def _check_column_names(column_names: List[str]):
     """Check the column names to make sure they don't contain duplicates."""
     counter = Counter(column_names)
-    if not all(count == 1 for count in counter.values()):
+    if any(count != 1 for count in counter.values()):
         duplicated_columns = [col for col in counter if counter[col] > 1]
         raise ValueError(
             f"The examples iterables can't have duplicated columns but columns {duplicated_columns} are duplicated."
@@ -334,16 +331,14 @@ class HorizontallyConcatenatedMultiSourcesExamplesIterable(_BaseExamplesIterable
                     examples.append(example)
                 except StopIteration:
                     ex_iterators.remove(ex_iterator)
-            if ex_iterators:
-                if i == 0:
-                    _check_column_names([column_name for example in examples for column_name in example])
-                new_example = {}
-                for example in examples:
-                    new_example.update(example)
-                new_key = "_".join(str(key) for key in keys)
-                yield new_key, new_example
-            else:
+            if not ex_iterators:
                 break
+            if i == 0:
+                _check_column_names([column_name for example in examples for column_name in example])
+            new_example = {}
+            for example in examples:
+                new_example |= example
+            yield ("_".join(str(key) for key in keys), new_example)
 
     def shuffle_data_sources(
         self, generator: np.random.Generator
@@ -438,7 +433,7 @@ class MappedExamplesIterable(_BaseExamplesIterable):
                     if self.batch_size is None or self.batch_size <= 0
                     else islice(iterator, self.batch_size - 1)
                 )
-                key_examples_list = [(key, example)] + [(key, example) for key, example in iterator_batch]
+                key_examples_list = [(key, example)] + list(iterator_batch)
                 keys, examples = zip(*key_examples_list)
                 if (
                     self.drop_last_batch
@@ -454,19 +449,19 @@ class MappedExamplesIterable(_BaseExamplesIterable):
                 if self.with_indices:
                     function_args.append([current_idx + i for i in range(len(key_examples_list))])
                 transformed_batch = dict(batch)  # this will be updated with the function output
-                transformed_batch.update(self.function(*function_args, **self.fn_kwargs))
+                transformed_batch |= self.function(*function_args, **self.fn_kwargs)
                 # then remove the unwanted columns
                 if self.remove_columns:
                     for c in self.remove_columns:
                         del transformed_batch[c]
                 if transformed_batch:
                     first_col = next(iter(transformed_batch))
-                    bad_cols = [
+                    if bad_cols := [
                         col
                         for col in transformed_batch
-                        if len(transformed_batch[col]) != len(transformed_batch[first_col])
-                    ]
-                    if bad_cols:
+                        if len(transformed_batch[col])
+                        != len(transformed_batch[first_col])
+                    ]:
                         raise ValueError(
                             f"Column lengths mismatch: columns {bad_cols} have length {[len(transformed_batch[col]) for col in bad_cols]} while {first_col} has length {len(transformed_batch[first_col])}."
                         )
@@ -487,7 +482,7 @@ class MappedExamplesIterable(_BaseExamplesIterable):
                 if self.with_indices:
                     function_args.append(current_idx)
                 transformed_example = dict(example)  # this will be updated with the function output
-                transformed_example.update(self.function(*function_args, **self.fn_kwargs))
+                transformed_example |= self.function(*function_args, **self.fn_kwargs)
                 # then we remove the unwanted columns
                 if self.remove_columns:
                     for c in self.remove_columns:
@@ -554,7 +549,7 @@ class FilteredExamplesIterable(_BaseExamplesIterable):
                     if self.batch_size is None or self.batch_size <= 0
                     else islice(iterator, self.batch_size - 1)
                 )
-                key_examples_list = [(key, example)] + [(key, example) for key, example in iterator_batch]
+                key_examples_list = [(key, example)] + list(iterator_batch)
                 keys, examples = zip(*key_examples_list)
                 batch = _examples_to_batch(examples)
                 # then compute the mask for the batch
@@ -575,8 +570,7 @@ class FilteredExamplesIterable(_BaseExamplesIterable):
                 function_args = [inputs] if self.input_columns is None else [inputs[col] for col in self.input_columns]
                 if self.with_indices:
                     function_args.append(current_idx)
-                to_keep = self.function(*function_args)
-                if to_keep:
+                if to_keep := self.function(*function_args):
                     yield key, example
                 current_idx += 1
 
@@ -696,9 +690,9 @@ def _apply_feature_types_on_example(
             example[column_name] = None
     # we encode the example for ClassLabel feature types for example
     encoded_example = features.encode_example(example)
-    # Decode example for Audio feature, e.g.
-    decoded_example = features.decode_example(encoded_example, token_per_repo_id=token_per_repo_id)
-    return decoded_example
+    return features.decode_example(
+        encoded_example, token_per_repo_id=token_per_repo_id
+    )
 
 
 def _apply_feature_types_on_batch(
@@ -712,9 +706,9 @@ def _apply_feature_types_on_batch(
             batch[column_name] = [None] * n_examples
     # we encode the batch for ClassLabel feature types for example
     encoded_batch = features.encode_batch(batch)
-    # Decode batch for Audio feature, e.g.
-    decoded_batch = features.decode_batch(encoded_batch, token_per_repo_id=token_per_repo_id)
-    return decoded_batch
+    return features.decode_batch(
+        encoded_batch, token_per_repo_id=token_per_repo_id
+    )
 
 
 class TypedExamplesIterable(_BaseExamplesIterable):
@@ -864,10 +858,10 @@ class IterableDataset(DatasetInfoMixin):
                 f"Therefore it's unnecessary to have a number of workers greater than dataset.n_shards={ex_iterable.n_shards}. "
                 f"To enable more parallelism, please split the dataset in more files than {ex_iterable.n_shards}."
             )
-        # split workload
-        shards_indices = list(range(worker_info.id, ex_iterable.n_shards, worker_info.num_workers))
         _log_prefix = f"node#{self._distributed.rank} " if self._distributed else ""
-        if shards_indices:
+        if shards_indices := list(
+            range(worker_info.id, ex_iterable.n_shards, worker_info.num_workers)
+        ):
             logger.debug(
                 f"{_log_prefix}dataloader worker#{worker_info.id}, ': Starting to iterate over {len(shards_indices)}/{ex_iterable.n_shards} shards."
             )
@@ -1496,7 +1490,7 @@ class IterableDataset(DatasetInfoMixin):
         if original_features is not None:
             ds_iterable._info.features = Features(
                 {
-                    column_mapping[col] if col in column_mapping.keys() else col: feature
+                    column_mapping[col] if col in column_mapping else col: feature
                     for col, feature in original_features.items()
                 }
             )
@@ -1869,7 +1863,7 @@ def _split_by_node_iterable_dataset(dataset: IterableDataset, rank: int, world_s
         [`IterableDataset`]: The iterable dataset to be used on the node at rank `rank`.
     """
     if dataset._distributed:
-        world_size = world_size * dataset._distributed.world_size
+        world_size *= dataset._distributed.world_size
         rank = world_size * dataset._distributed.rank + rank
     distributed = DistributedConfig(rank=rank, world_size=world_size)
     return IterableDataset(

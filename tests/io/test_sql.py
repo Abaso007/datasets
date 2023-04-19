@@ -26,7 +26,10 @@ def test_dataset_from_sql_keep_in_memory(keep_in_memory, sqlite_path, tmp_path, 
     expected_features = {"col_1": "string", "col_2": "int64", "col_3": "float64"}
     with assert_arrow_memory_increases() if keep_in_memory else assert_arrow_memory_doesnt_increase():
         dataset = SqlDatasetReader(
-            "dataset", "sqlite:///" + sqlite_path, cache_dir=cache_dir, keep_in_memory=keep_in_memory
+            "dataset",
+            f"sqlite:///{sqlite_path}",
+            cache_dir=cache_dir,
+            keep_in_memory=keep_in_memory,
         ).read()
     _check_sql_dataset(dataset, expected_features)
 
@@ -49,7 +52,12 @@ def test_dataset_from_sql_features(features, sqlite_path, tmp_path, set_sqlalche
     features = (
         Features({feature: Value(dtype) for feature, dtype in features.items()}) if features is not None else None
     )
-    dataset = SqlDatasetReader("dataset", "sqlite:///" + sqlite_path, features=features, cache_dir=cache_dir).read()
+    dataset = SqlDatasetReader(
+        "dataset",
+        f"sqlite:///{sqlite_path}",
+        features=features,
+        cache_dir=cache_dir,
+    ).read()
     _check_sql_dataset(dataset, expected_features)
 
 
@@ -57,16 +65,19 @@ def iter_sql_file(sqlite_path):
     with contextlib.closing(sqlite3.connect(sqlite_path)) as con:
         cur = con.cursor()
         cur.execute("SELECT * FROM dataset")
-        for row in cur:
-            yield row
+        yield from cur
 
 
 @require_sqlalchemy
 def test_dataset_to_sql(sqlite_path, tmp_path, set_sqlalchemy_silence_uber_warning):
     cache_dir = tmp_path / "cache"
     output_sqlite_path = os.path.join(cache_dir, "tmp.sql")
-    dataset = SqlDatasetReader("dataset", "sqlite:///" + sqlite_path, cache_dir=cache_dir).read()
-    SqlDatasetWriter(dataset, "dataset", "sqlite:///" + output_sqlite_path, num_proc=1).write()
+    dataset = SqlDatasetReader(
+        "dataset", f"sqlite:///{sqlite_path}", cache_dir=cache_dir
+    ).read()
+    SqlDatasetWriter(
+        dataset, "dataset", f"sqlite:///{output_sqlite_path}", num_proc=1
+    ).write()
 
     original_sql = iter_sql_file(sqlite_path)
     expected_sql = iter_sql_file(output_sqlite_path)
@@ -79,8 +90,12 @@ def test_dataset_to_sql(sqlite_path, tmp_path, set_sqlalchemy_silence_uber_warni
 def test_dataset_to_sql_multiproc(sqlite_path, tmp_path, set_sqlalchemy_silence_uber_warning):
     cache_dir = tmp_path / "cache"
     output_sqlite_path = os.path.join(cache_dir, "tmp.sql")
-    dataset = SqlDatasetReader("dataset", "sqlite:///" + sqlite_path, cache_dir=cache_dir).read()
-    SqlDatasetWriter(dataset, "dataset", "sqlite:///" + output_sqlite_path, num_proc=2).write()
+    dataset = SqlDatasetReader(
+        "dataset", f"sqlite:///{sqlite_path}", cache_dir=cache_dir
+    ).read()
+    SqlDatasetWriter(
+        dataset, "dataset", f"sqlite:///{output_sqlite_path}", num_proc=2
+    ).write()
 
     original_sql = iter_sql_file(sqlite_path)
     expected_sql = iter_sql_file(output_sqlite_path)
@@ -93,6 +108,10 @@ def test_dataset_to_sql_multiproc(sqlite_path, tmp_path, set_sqlalchemy_silence_
 def test_dataset_to_sql_invalidproc(sqlite_path, tmp_path, set_sqlalchemy_silence_uber_warning):
     cache_dir = tmp_path / "cache"
     output_sqlite_path = os.path.join(cache_dir, "tmp.sql")
-    dataset = SqlDatasetReader("dataset", "sqlite:///" + sqlite_path, cache_dir=cache_dir).read()
+    dataset = SqlDatasetReader(
+        "dataset", f"sqlite:///{sqlite_path}", cache_dir=cache_dir
+    ).read()
     with pytest.raises(ValueError):
-        SqlDatasetWriter(dataset, "dataset", "sqlite:///" + output_sqlite_path, num_proc=0).write()
+        SqlDatasetWriter(
+            dataset, "dataset", f"sqlite:///{output_sqlite_path}", num_proc=0
+        ).write()

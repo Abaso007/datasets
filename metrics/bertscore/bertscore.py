@@ -25,7 +25,7 @@ import datasets
 @contextmanager
 def filter_logging_context():
     def filter_log(record):
-        return False if "This IS expected if you are initializing" in record.msg else True
+        return "This IS expected if you are initializing" not in record.msg
 
     logger = datasets.utils.logging.get_logger("transformers.modeling_utils")
     logger.addFilter(filter_log)
@@ -182,13 +182,12 @@ class BERTScore(datasets.Metric):
             verbose=verbose,
             batch_size=batch_size,
         )
-        output_dict = {
+        return {
             "precision": P.tolist(),
             "recall": R.tolist(),
             "f1": F.tolist(),
             "hashcode": hashcode,
         }
-        return output_dict
 
     def add_batch(self, predictions=None, references=None, **kwargs):
         """Add a batch of predictions and references for the metric's stack."""

@@ -35,8 +35,6 @@ def read_unformated(feats, tmp_dir):
     dataset = datasets.Dataset.from_file(
         filename=os.path.join(tmp_dir, "beta.arrow"), info=datasets.DatasetInfo(features=feats)
     )
-    for _ in dataset:
-        pass
 
 
 @get_duration
@@ -45,8 +43,6 @@ def read_formatted_as_numpy(feats, tmp_dir):
         filename=os.path.join(tmp_dir, "beta.arrow"), info=datasets.DatasetInfo(features=feats)
     )
     dataset.set_format("numpy")
-    for _ in dataset:
-        pass
 
 
 @get_duration
@@ -104,7 +100,7 @@ def benchmark_array_xd():
         data = generate_examples(features=feats, num_examples=SPEED_TEST_N_EXAMPLES)
         times["write_array2d"] = write(feats, data, tmp_dir)
         for read_func in read_functions:
-            times[read_func.__name__ + " after write_array2d"] = read_func(feats, tmp_dir)
+            times[f"{read_func.__name__} after write_array2d"] = read_func(feats, tmp_dir)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         # don't use fixed length for fair comparison
@@ -117,7 +113,9 @@ def benchmark_array_xd():
         )
         times["write_nested_sequence"] = write(feats, data, tmp_dir)
         for read_func in read_functions:
-            times[read_func.__name__ + " after write_nested_sequence"] = read_func(feats, tmp_dir)
+            times[
+                f"{read_func.__name__} after write_nested_sequence"
+            ] = read_func(feats, tmp_dir)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         # don't use fixed length for fair comparison
@@ -132,7 +130,9 @@ def benchmark_array_xd():
         )
         times["write_flattened_sequence"] = write(feats, data, tmp_dir)
         for read_func in read_functions:
-            times[read_func.__name__ + " after write_flattened_sequence"] = read_func(feats, tmp_dir)
+            times[
+                f"{read_func.__name__} after write_flattened_sequence"
+            ] = read_func(feats, tmp_dir)
 
     with open(RESULTS_FILE_PATH, "wb") as f:
         f.write(json.dumps(times).encode("utf-8"))

@@ -90,8 +90,7 @@ def test_csv_generate_tables_raises_error_with_malformed_csv(csv_file, malformed
     csv = Csv()
     generator = csv._generate_tables([[csv_file, malformed_csv_file]])
     with pytest.raises(ValueError, match="Error tokenizing data"):
-        for _ in generator:
-            pass
+        pass
     assert any(
         record.levelname == "ERROR"
         and "Failed to read file" in record.message

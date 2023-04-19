@@ -131,7 +131,7 @@ def evaluate_multirc(ids_preds, labels):
         else:
             question_map[question_id] = [(pred, label)]
     f1s, ems = [], []
-    for question, preds_labels in question_map.items():
+    for preds_labels in question_map.values():
         question_preds, question_labels = zip(*preds_labels)
         f1 = f1_score(y_true=question_labels, y_pred=question_preds, average="macro")
         f1s.append(f1)
@@ -170,7 +170,9 @@ class SuperGlue(datasets.Metric):
             features=datasets.Features(self._get_feature_types()),
             codebase_urls=[],
             reference_urls=[],
-            format="numpy" if not self.config_name == "record" and not self.config_name == "multirc" else None,
+            format="numpy"
+            if self.config_name not in ["record", "multirc"]
+            else None,
         )
 
     def _get_feature_types(self):

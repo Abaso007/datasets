@@ -404,11 +404,11 @@ class DatasetInfo:
 
 class DatasetInfosDict(Dict[str, DatasetInfo]):
     def write_to_directory(self, dataset_infos_dir, overwrite=False, pretty_print=False) -> None:
-        total_dataset_infos = {}
         dataset_infos_path = os.path.join(dataset_infos_dir, config.DATASETDICT_INFOS_FILENAME)
         dataset_readme_path = os.path.join(dataset_infos_dir, "README.md")
-        if not overwrite:
-            total_dataset_infos = self.from_directory(dataset_infos_dir)
+        total_dataset_infos = (
+            {} if overwrite else self.from_directory(dataset_infos_dir)
+        )
         total_dataset_infos.update(self)
         if os.path.exists(dataset_infos_path):
             # for backward compatibility, let's update the JSON file if it exists
@@ -448,42 +448,41 @@ class DatasetInfosDict(Dict[str, DatasetInfo]):
 
     @classmethod
     def from_metadata(cls, dataset_metadata: DatasetMetadata) -> "DatasetInfosDict":
-        if isinstance(dataset_metadata.get("dataset_info"), (list, dict)):
-            if isinstance(dataset_metadata["dataset_info"], list):
-                return cls(
-                    {
-                        dataset_info_yaml_dict.get("config_name", "default"): DatasetInfo._from_yaml_dict(
-                            dataset_info_yaml_dict
-                        )
-                        for dataset_info_yaml_dict in dataset_metadata["dataset_info"]
-                    }
-                )
-            else:
-                dataset_info = DatasetInfo._from_yaml_dict(dataset_metadata["dataset_info"])
-                dataset_info.config_name = dataset_metadata["dataset_info"].get("config_name", "default")
-                return cls({dataset_info.config_name: dataset_info})
-        else:
+        if not isinstance(dataset_metadata.get("dataset_info"), (list, dict)):
             return cls()
+        if isinstance(dataset_metadata["dataset_info"], list):
+            return cls(
+                {
+                    dataset_info_yaml_dict.get("config_name", "default"): DatasetInfo._from_yaml_dict(
+                        dataset_info_yaml_dict
+                    )
+                    for dataset_info_yaml_dict in dataset_metadata["dataset_info"]
+                }
+            )
+        dataset_info = DatasetInfo._from_yaml_dict(dataset_metadata["dataset_info"])
+        dataset_info.config_name = dataset_metadata["dataset_info"].get("config_name", "default")
+        return cls({dataset_info.config_name: dataset_info})
 
     def to_metadata(self, dataset_metadata: DatasetMetadata) -> None:
-        if self:
-            total_dataset_infos = {config_name: dset_info._to_yaml_dict() for config_name, dset_info in self.items()}
-            # the config_name from the dataset_infos_dict takes over the config_name of the DatasetInfo
-            for config_name, dset_info_yaml_dict in total_dataset_infos.items():
-                dset_info_yaml_dict["config_name"] = config_name
-            if len(total_dataset_infos) == 1:
-                # use a struct instead of a list of configurations, since there's only one
-                dataset_metadata["dataset_info"] = next(iter(total_dataset_infos.values()))
-                # no need to include the configuration name when there's only one configuration and it's called "default"
-                if dataset_metadata["dataset_info"].get("config_name") == "default":
-                    dataset_metadata["dataset_info"].pop("config_name", None)
-            else:
-                dataset_metadata["dataset_info"] = []
-                for config_name, dataset_info_yaml_dict in total_dataset_infos.items():
-                    # add the config_name field in first position
-                    dataset_info_yaml_dict.pop("config_name", None)
-                    dataset_info_yaml_dict = {"config_name": config_name, **dataset_info_yaml_dict}
-                    dataset_metadata["dataset_info"].append(dataset_info_yaml_dict)
+        if not self:
+            return
+        total_dataset_infos = {config_name: dset_info._to_yaml_dict() for config_name, dset_info in self.items()}
+        # the config_name from the dataset_infos_dict takes over the config_name of the DatasetInfo
+        for config_name, dset_info_yaml_dict in total_dataset_infos.items():
+            dset_info_yaml_dict["config_name"] = config_name
+        if len(total_dataset_infos) == 1:
+            # use a struct instead of a list of configurations, since there's only one
+            dataset_metadata["dataset_info"] = next(iter(total_dataset_infos.values()))
+            # no need to include the configuration name when there's only one configuration and it's called "default"
+            if dataset_metadata["dataset_info"].get("config_name") == "default":
+                dataset_metadata["dataset_info"].pop("config_name", None)
+        else:
+            dataset_metadata["dataset_info"] = []
+            for config_name, dataset_info_yaml_dict in total_dataset_infos.items():
+                # add the config_name field in first position
+                dataset_info_yaml_dict.pop("config_name", None)
+                dataset_info_yaml_dict = {"config_name": config_name, **dataset_info_yaml_dict}
+                dataset_metadata["dataset_info"].append(dataset_info_yaml_dict)
 
 
 @dataclass

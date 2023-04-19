@@ -162,7 +162,7 @@ def test_datasetdict_from_json_splits(split, jsonl_path, tmp_path):
     expected_features = {"col_1": "string", "col_2": "int64", "col_3": "float64"}
     dataset = JsonDatasetReader(path, cache_dir=cache_dir).read()
     _check_json_datasetdict(dataset, expected_features, splits=list(path.keys()))
-    assert all(dataset[split].split == split for split in path.keys())
+    assert all(dataset[split].split == split for split in path)
 
 
 def load_json(buffer):

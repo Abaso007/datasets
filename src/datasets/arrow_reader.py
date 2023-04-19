@@ -208,8 +208,7 @@ class BaseReader:
         file_instructions = make_file_instructions(
             name, split_infos, instruction, filetype_suffix=self._filetype_suffix, prefix_path=self._path
         )
-        files = file_instructions.file_instructions
-        return files
+        return file_instructions.file_instructions
 
     def read(
         self,
@@ -265,8 +264,7 @@ class BaseReader:
             split = Split(str(original_instructions))
         else:
             split = None
-        dataset_kwargs = {"arrow_table": pa_table, "info": self._info, "split": split}
-        return dataset_kwargs
+        return {"arrow_table": pa_table, "info": self._info, "split": split}
 
     def download_from_hf_gcs(self, download_config: DownloadConfig, relative_data_dir):
         """
@@ -278,7 +276,9 @@ class BaseReader:
                 the `datasets` directory on GCS.
 
         """
-        remote_cache_dir = HF_GCP_BASE_URL + "/" + relative_data_dir.replace(os.sep, "/")
+        remote_cache_dir = f"{HF_GCP_BASE_URL}/" + relative_data_dir.replace(
+            os.sep, "/"
+        )
         try:
             remote_dataset_info = os.path.join(remote_cache_dir, "dataset_info.json")
             downloaded_dataset_info = cached_path(remote_dataset_info.replace(os.sep, "/"))
@@ -332,7 +332,11 @@ class ArrowReader(BaseReader):
         if take == -1:
             take = len(table) - skip
         # here we don't want to slice an empty table, or it may segfault
-        if skip is not None and take is not None and not (skip == 0 and take == len(table)):
+        if (
+            skip is not None
+            and take is not None
+            and (skip != 0 or take != len(table))
+        ):
             table = table.slice(skip, take)
         return table
 
@@ -378,7 +382,11 @@ class ParquetReader(BaseReader):
         # Parquet read_table always loads data in memory, independently of memory_map
         pa_table = pq.read_table(filename, memory_map=True)
         # here we don't want to slice an empty table, or it may segfault
-        if skip is not None and take is not None and not (skip == 0 and take == len(pa_table)):
+        if (
+            skip is not None
+            and take is not None
+            and (skip != 0 or take != len(pa_table))
+        ):
             pa_table = pa_table.slice(skip, take)
         return pa_table
 

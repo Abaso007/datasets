@@ -34,7 +34,7 @@ def dataset():
             "id": datasets.Value("int64"),
         }
     )
-    dataset = datasets.Dataset.from_dict(
+    return datasets.Dataset.from_dict(
         {
             "tokens": [["foo"] * 5] * n,
             "labels": [[1] * 5] * n,
@@ -43,7 +43,6 @@ def dataset():
         },
         features=features,
     )
-    return dataset
 
 
 @pytest.fixture(scope="session")

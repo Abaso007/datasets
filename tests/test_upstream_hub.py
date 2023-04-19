@@ -323,7 +323,7 @@ class TestPushToHub:
 
             assert list(local_ds_dict.keys()) == list(hub_ds_dict.keys())
 
-            for ds_split_name in local_ds_dict.keys():
+            for ds_split_name in local_ds_dict:
                 local_ds = local_ds_dict[ds_split_name]
                 hub_ds = hub_ds_dict[ds_split_name]
                 assert local_ds.column_names == hub_ds.column_names

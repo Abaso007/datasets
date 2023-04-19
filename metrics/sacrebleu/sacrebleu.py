@@ -153,7 +153,7 @@ class Sacrebleu(datasets.Metric):
             use_effective_order=use_effective_order,
             **({"tokenize": tokenize} if tokenize else {}),
         )
-        output_dict = {
+        return {
             "score": output.score,
             "counts": output.counts,
             "totals": output.totals,
@@ -162,4 +162,3 @@ class Sacrebleu(datasets.Metric):
             "sys_len": output.sys_len,
             "ref_len": output.ref_len,
         }
-        return output_dict

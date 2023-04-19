@@ -87,8 +87,7 @@ def metric_compute(arg):
             num_process=num_process, process_id=process_id, experiment_id=exp_id, cache_dir=cache_dir, timeout=5
         )
         time.sleep(wait)
-        results = metric.compute(predictions=preds, references=refs)
-        return results
+        return metric.compute(predictions=preds, references=refs)
     finally:
         properly_del_metric(metric)
 
@@ -105,8 +104,7 @@ def metric_add_batch_and_compute(arg):
         )
         metric.add_batch(predictions=preds, references=refs)
         time.sleep(wait)
-        results = metric.compute()
-        return results
+        return metric.compute()
     finally:
         properly_del_metric(metric)
 
@@ -124,8 +122,7 @@ def metric_add_and_compute(arg):
         for pred, ref in zip(preds, refs):
             metric.add(prediction=pred, reference=ref)
         time.sleep(wait)
-        results = metric.compute()
-        return results
+        return metric.compute()
     finally:
         properly_del_metric(metric)
 

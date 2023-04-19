@@ -34,13 +34,12 @@ class NumpyFormatter(Formatter[Mapping, np.ndarray, Mapping]):
                 isinstance(x, np.ndarray) and x.shape == column[0].shape and x.dtype == column[0].dtype for x in column
             ):
                 return np.stack(column)
-            else:
-                # don't use np.array(column, dtype=object)
-                # since it fails in certain cases
-                # see https://stackoverflow.com/q/51005699
-                out = np.empty(len(column), dtype=object)
-                out[:] = column
-                return out
+            # don't use np.array(column, dtype=object)
+            # since it fails in certain cases
+            # see https://stackoverflow.com/q/51005699
+            out = np.empty(len(column), dtype=object)
+            out[:] = column
+            return out
         return column
 
     def _tensorize(self, value):
@@ -67,9 +66,8 @@ class NumpyFormatter(Formatter[Mapping, np.ndarray, Mapping]):
 
     def _recursive_tensorize(self, data_struct: dict):
         # support for nested types like struct of list of struct
-        if isinstance(data_struct, np.ndarray):
-            if data_struct.dtype == object:  # torch tensors cannot be instantied from an array of objects
-                return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
+        if isinstance(data_struct, np.ndarray) and data_struct.dtype == object:
+            return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
         return self._tensorize(data_struct)
 
     def recursive_tensorize(self, data_struct: dict):

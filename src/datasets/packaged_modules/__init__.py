@@ -16,8 +16,7 @@ from .text import text
 def _hash_python_lines(lines: List[str]) -> str:
     filtered_lines = []
     for line in lines:
-        line = re.sub(r"#.*", "", line)  # remove comments
-        if line:
+        if line := re.sub(r"#.*", "", line):
             filtered_lines.append(line)
     full_str = "\n".join(filtered_lines)
 
@@ -37,16 +36,30 @@ _PACKAGED_DATASETS_MODULES = {
     "audiofolder": (audiofolder.__name__, _hash_python_lines(inspect.getsource(audiofolder).splitlines())),
 }
 
-_EXTENSION_TO_MODULE = {
-    "csv": ("csv", {}),
-    "tsv": ("csv", {"sep": "\t"}),
-    "json": ("json", {}),
-    "jsonl": ("json", {}),
-    "parquet": ("parquet", {}),
-    "txt": ("text", {}),
-}
-_EXTENSION_TO_MODULE.update({ext[1:]: ("imagefolder", {}) for ext in imagefolder.ImageFolder.EXTENSIONS})
-_EXTENSION_TO_MODULE.update({ext[1:].upper(): ("imagefolder", {}) for ext in imagefolder.ImageFolder.EXTENSIONS})
-_EXTENSION_TO_MODULE.update({ext[1:]: ("audiofolder", {}) for ext in audiofolder.AudioFolder.EXTENSIONS})
-_EXTENSION_TO_MODULE.update({ext[1:].upper(): ("audiofolder", {}) for ext in audiofolder.AudioFolder.EXTENSIONS})
+_EXTENSION_TO_MODULE = (
+    {
+        "csv": ("csv", {}),
+        "tsv": ("csv", {"sep": "\t"}),
+        "json": ("json", {}),
+        "jsonl": ("json", {}),
+        "parquet": ("parquet", {}),
+        "txt": ("text", {}),
+    }
+    | {
+        ext[1:]: ("imagefolder", {})
+        for ext in imagefolder.ImageFolder.EXTENSIONS
+    }
+    | {
+        ext[1:].upper(): ("imagefolder", {})
+        for ext in imagefolder.ImageFolder.EXTENSIONS
+    }
+    | {
+        ext[1:]: ("audiofolder", {})
+        for ext in audiofolder.AudioFolder.EXTENSIONS
+    }
+    | {
+        ext[1:].upper(): ("audiofolder", {})
+        for ext in audiofolder.AudioFolder.EXTENSIONS
+    }
+)
 _MODULE_SUPPORTS_METADATA = {"imagefolder", "audiofolder"}

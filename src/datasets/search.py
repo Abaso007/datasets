@@ -127,7 +127,7 @@ class ElasticSearchIndex(BaseIndex):
         self.es_index_name = (
             es_index_name
             if es_index_name is not None
-            else "huggingface_datasets_" + os.path.basename(tempfile.NamedTemporaryFile().name)
+            else f"huggingface_datasets_{os.path.basename(tempfile.NamedTemporaryFile().name)}"
         )
         self.es_index_config = (
             es_index_config
@@ -268,15 +268,17 @@ class FaissIndex(BaseIndex):
         if self.faiss_index is None:
             size = len(vectors[0]) if column is None else len(vectors[0][column])
             if self.string_factory is not None:
-                if self.metric_type is None:
-                    index = faiss.index_factory(size, self.string_factory)
-                else:
-                    index = faiss.index_factory(size, self.string_factory, self.metric_type)
+                index = (
+                    faiss.index_factory(size, self.string_factory)
+                    if self.metric_type is None
+                    else faiss.index_factory(
+                        size, self.string_factory, self.metric_type
+                    )
+                )
+            elif self.metric_type is None:
+                index = faiss.IndexFlat(size)
             else:
-                if self.metric_type is None:
-                    index = faiss.IndexFlat(size)
-                else:
-                    index = faiss.IndexFlat(size, self.metric_type)
+                index = faiss.IndexFlat(size, self.metric_type)
 
             self.faiss_index = self._faiss_index_to_device(index, self.device)
             logger.info(f"Created faiss index of type {type(self.faiss_index)}")

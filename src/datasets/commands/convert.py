@@ -138,9 +138,13 @@ class ConvertCommand(BaseDatasetsCLICommand):
                 elif any(expression in out_line for expression in TO_HIGHLIGHT):
                     needs_manual_update = True
                     to_remove = list(filter(lambda e: e in out_line, TO_HIGHLIGHT))
-                    out_lines.append(HIGHLIGHT_MESSAGE_PRE + str(to_remove) + "\n")
-                    out_lines.append(out_line)
-                    out_lines.append(HIGHLIGHT_MESSAGE_POST)
+                    out_lines.extend(
+                        (
+                            HIGHLIGHT_MESSAGE_PRE + str(to_remove) + "\n",
+                            out_line,
+                            HIGHLIGHT_MESSAGE_POST,
+                        )
+                    )
                     continue
                 else:
                     for pattern, replacement in TO_CONVERT:
@@ -149,8 +153,8 @@ class ConvertCommand(BaseDatasetsCLICommand):
                 # Take care of saving utilities (to later move them together with main script)
                 if "tensorflow_datasets" in out_line:
                     match = re.match(r"from\stensorflow_datasets.*import\s([^\.\r\n]+)", out_line)
-                    tfds_imports.extend(imp.strip() for imp in match.group(1).split(","))
-                    out_line = "from . import " + match.group(1)
+                    tfds_imports.extend(imp.strip() for imp in match[1].split(","))
+                    out_line = f"from . import {match[1]}"
 
                 # Check we have not forget anything
                 if "tf." in out_line or "tfds." in out_line or "tensorflow_datasets" in out_line:
@@ -167,7 +171,7 @@ class ConvertCommand(BaseDatasetsCLICommand):
                 output_file = os.path.join(output_dir, f_name)
                 os.makedirs(output_dir, exist_ok=True)
                 self._logger.info(f"Adding directory {output_dir}")
-                imports_to_builder_map.update({imp: output_dir for imp in tfds_imports})
+                imports_to_builder_map |= {imp: output_dir for imp in tfds_imports}
             else:
                 # Utilities will be moved at the end
                 utils_files.append(output_file)

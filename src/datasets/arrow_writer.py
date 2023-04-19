@@ -314,12 +314,7 @@ class ArrowWriter:
             self._features = None
             self._schema = None
 
-        if hash_salt is not None:
-            # Create KeyHasher instance using split name as hash salt
-            self._hasher = KeyHasher(hash_salt)
-        else:
-            self._hasher = KeyHasher("")
-
+        self._hasher = KeyHasher(hash_salt) if hash_salt is not None else KeyHasher("")
         self._check_duplicates = check_duplicates
         self._disable_nullable = disable_nullable
 
@@ -327,9 +322,9 @@ class ArrowWriter:
             fs_token_paths = fsspec.get_fs_token_paths(path, storage_options=storage_options)
             self._fs: fsspec.AbstractFileSystem = fs_token_paths[0]
             self._path = (
-                fs_token_paths[2][0]
-                if not is_remote_filesystem(self._fs)
-                else self._fs.unstrip_protocol(fs_token_paths[2][0])
+                self._fs.unstrip_protocol(fs_token_paths[2][0])
+                if is_remote_filesystem(self._fs)
+                else fs_token_paths[2][0]
             )
             self.stream = self._fs.open(fs_token_paths[2][0], "wb")
             self._closable_stream = True
@@ -377,17 +372,15 @@ class ArrowWriter:
     def _build_writer(self, inferred_schema: pa.Schema):
         schema = self.schema
         inferred_features = Features.from_arrow_schema(inferred_schema)
-        if self._features is not None:
-            if self.update_features:  # keep original features it they match, or update them
-                fields = {field.name: field for field in self._features.type}
-                for inferred_field in inferred_features.type:
-                    name = inferred_field.name
-                    if name in fields:
-                        if inferred_field == fields[name]:
-                            inferred_features[name] = self._features[name]
-                self._features = inferred_features
-                schema: pa.Schema = inferred_schema
-        else:
+        if self._features is None:
+            self._features = inferred_features
+            schema: pa.Schema = inferred_schema
+        elif self.update_features:  # keep original features it they match, or update them
+            fields = {field.name: field for field in self._features.type}
+            for inferred_field in inferred_features.type:
+                name = inferred_field.name
+                if name in fields and inferred_field == fields[name]:
+                    inferred_features[name] = self._features[name]
             self._features = inferred_features
             schema: pa.Schema = inferred_schema
         if self.disable_nullable:
@@ -412,8 +405,7 @@ class ArrowWriter:
     def _build_metadata(info: DatasetInfo, fingerprint: Optional[str] = None) -> Dict[str, str]:
         info_keys = ["features"]  # we can add support for more DatasetInfo keys in the future
         info_as_dict = asdict(info)
-        metadata = {}
-        metadata["info"] = {key: info_as_dict[key] for key in info_keys}
+        metadata = {"info": {key: info_as_dict[key] for key in info_keys}}
         if fingerprint is not None:
             metadata["fingerprint"] = fingerprint
         return {"huggingface": json.dumps(metadata)}
@@ -533,8 +525,10 @@ class ArrowWriter:
         arrays = []
         inferred_features = Features()
         cols = (
-            [col for col in self.schema.names if col in batch_examples]
-            + [col for col in batch_examples.keys() if col not in self.schema.names]
+            (
+                [col for col in self.schema.names if col in batch_examples]
+                + [col for col in batch_examples if col not in self.schema.names]
+            )
             if self.schema
             else batch_examples.keys()
         )
@@ -668,10 +662,12 @@ class BeamWriter:
         from .utils import beam_utils
 
         shards_metadata = list(
-            beam.io.filesystems.FileSystems.match([self._parquet_path + "*.parquet"])[0].metadata_list
+            beam.io.filesystems.FileSystems.match(
+                [f"{self._parquet_path}*.parquet"]
+            )[0].metadata_list
         )
         shards = [metadata.path for metadata in shards_metadata]
-        num_bytes = sum([metadata.size_in_bytes for metadata in shards_metadata])
+        num_bytes = sum(metadata.size_in_bytes for metadata in shards_metadata)
         shard_lengths = get_parquet_lengths(shards)
 
         # Convert to arrow
@@ -679,9 +675,9 @@ class BeamWriter:
             logger.info(f"Converting parquet files {self._parquet_path} to arrow {self._path}")
             shards = [
                 metadata.path
-                for metadata in beam.io.filesystems.FileSystems.match([self._parquet_path + "*.parquet"])[
-                    0
-                ].metadata_list
+                for metadata in beam.io.filesystems.FileSystems.match(
+                    [f"{self._parquet_path}*.parquet"]
+                )[0].metadata_list
             ]
             try:  # stream conversion
                 disable = not logging.is_progress_bar_enabled()
@@ -704,7 +700,9 @@ class BeamWriter:
                 disable = not logging.is_progress_bar_enabled()
                 num_bytes = 0
                 for shard in logging.tqdm(shards, unit="shards", disable=disable):
-                    local_parquet_path = os.path.join(local_convert_dir, hash_url_to_filename(shard) + ".parquet")
+                    local_parquet_path = os.path.join(
+                        local_convert_dir, f"{hash_url_to_filename(shard)}.parquet"
+                    )
                     beam_utils.download_remote_to_local(shard, local_parquet_path)
                     local_arrow_path = local_parquet_path.replace(".parquet", ".arrow")
                     shard_num_bytes, _ = parquet_to_arrow(local_parquet_path, local_arrow_path)
