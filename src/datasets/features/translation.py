@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class Translation:
-    """`FeatureConnector` for translations with fixed languages per example.
+    """`Feature` for translations with fixed languages per example.
     Here for compatiblity with tfds.
 
     Args:
@@ -50,7 +50,7 @@ class Translation:
 
 @dataclass
 class TranslationVariableLanguages:
-    """`FeatureConnector` for translations with variable languages per example.
+    """`Feature` for translations with variable languages per example.
     Here for compatiblity with tfds.
 
     Args:
@@ -98,9 +98,11 @@ class TranslationVariableLanguages:
 
     def encode_example(self, translation_dict):
         lang_set = set(self.languages)
-        if self.languages and set(translation_dict) - lang_set:
+        if set(translation_dict) == {"language", "translation"}:
+            return translation_dict
+        elif self.languages and set(translation_dict) - lang_set:
             raise ValueError(
-                f'Some languages in example ({", ".join(sorted(set(translation_dict) - lang_set))}) are not in valid set ({", ".join(lang_set)}).'
+                f"Some languages in example ({', '.join(sorted(set(translation_dict) - lang_set))}) are not in valid set ({', '.join(lang_set)})."
             )
 
         # Convert dictionary into tuples, splitting out cases where there are

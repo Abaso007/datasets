@@ -5,6 +5,7 @@ import yaml
 
 from datasets.features.features import Features, Value
 from datasets.info import DatasetInfo, DatasetInfosDict
+from datasets.utils.py_utils import asdict
 
 
 @pytest.mark.parametrize(
@@ -65,7 +66,6 @@ def test_dataset_info_to_yaml_dict():
         features=Features({"a": Value("int32")}),
         post_processed={},
         supervised_keys=(),
-        task_templates=[],
         builder_name="builder",
         config_name="config",
         version="1.0.0",
@@ -134,3 +134,45 @@ def test_dataset_infos_dict_dump_and_reload(tmp_path, dataset_infos_dict: Datase
 
     if dataset_infos_dict:
         assert os.path.exists(os.path.join(tmp_path, "README.md"))
+
+
+@pytest.mark.parametrize(
+    "dataset_info",
+    [
+        None,
+        DatasetInfo(),
+        DatasetInfo(
+            description="foo",
+            features=Features({"a": Value("int32")}),
+            builder_name="builder",
+            config_name="config",
+            version="1.0.0",
+            splits=[{"name": "train"}],
+            download_size=42,
+            dataset_name="dataset_name",
+        ),
+    ],
+)
+def test_from_merge_same_dataset_infos(dataset_info):
+    num_elements = 3
+    if dataset_info is not None:
+        dataset_info_list = [dataset_info.copy() for _ in range(num_elements)]
+    else:
+        dataset_info_list = [None] * num_elements
+    dataset_info_merged = DatasetInfo.from_merge(dataset_info_list)
+    if dataset_info is not None:
+        assert dataset_info == dataset_info_merged
+    else:
+        assert DatasetInfo() == dataset_info_merged
+
+
+def test_dataset_info_from_dict_with_large_list():
+    dataset_info_dict = {
+        "citation": "",
+        "description": "",
+        "features": {"col_1": {"feature": {"dtype": "int64", "_type": "Value"}, "_type": "LargeList"}},
+        "homepage": "",
+        "license": "",
+    }
+    dataset_info = DatasetInfo.from_dict(dataset_info_dict)
+    assert asdict(dataset_info) == dataset_info_dict

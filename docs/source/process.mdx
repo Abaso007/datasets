@@ -131,7 +131,7 @@ For example, the [imdb](https://huggingface.co/datasets/imdb) dataset has 25000 
 
 ```py
 >>> from datasets import load_dataset
->>> datasets = load_dataset("imdb", split="train")
+>>> dataset = load_dataset("imdb", split="train")
 >>> print(dataset)
 Dataset({
     features: ['text', 'label'],
@@ -195,6 +195,28 @@ Dataset({
 })
 ```
 
+Conversely, [`~Dataset.select_columns`] selects one or more columns to keep and removes the rest. This function takes either one or a list of column names:
+
+```py
+>>> dataset
+Dataset({
+    features: ['sentence1', 'sentence2', 'label', 'idx'],
+    num_rows: 3668
+})
+>>> dataset = dataset.select_columns(['sentence1', 'sentence2', 'idx'])
+>>> dataset
+Dataset({
+    features: ['sentence1', 'sentence2', 'idx'],
+    num_rows: 3668
+})
+>>> dataset = dataset.select_columns('idx')
+>>> dataset
+Dataset({
+    features: ['idx'],
+    num_rows: 3668
+})
+```
+
 ### Cast
 
 The [`~Dataset.cast`] function transforms the feature type of one or more columns. This function accepts your new [`Features`] as its argument. The example below demonstrates how to change the [`ClassLabel`] and [`Value`] features:
@@ -203,7 +225,7 @@ The [`~Dataset.cast`] function transforms the feature type of one or more column
 >>> dataset.features
 {'sentence1': Value(dtype='string', id=None),
 'sentence2': Value(dtype='string', id=None),
-'label': ClassLabel(num_classes=2, names=['not_equivalent', 'equivalent'], names_file=None, id=None),
+'label': ClassLabel(names=['not_equivalent', 'equivalent'], id=None),
 'idx': Value(dtype='int32', id=None)}
 
 >>> from datasets import ClassLabel, Value
@@ -214,7 +236,7 @@ The [`~Dataset.cast`] function transforms the feature type of one or more column
 >>> dataset.features
 {'sentence1': Value(dtype='string', id=None),
 'sentence2': Value(dtype='string', id=None),
-'label': ClassLabel(num_classes=2, names=['negative', 'positive'], names_file=None, id=None),
+'label': ClassLabel(names=['negative', 'positive'], id=None),
 'idx': Value(dtype='int64', id=None)}
 ```
 
@@ -318,35 +340,65 @@ You can also use [`~Dataset.map`] with indices if you set `with_indices=True`. T
 ]
 ```
 
+### Multiprocessing
+
+Multiprocessing significantly speeds up processing by parallelizing processes on the CPU. Set the `num_proc` parameter in [`~Dataset.map`] to set the number of processes to use:
+
+```py
+>>> updated_dataset = dataset.map(lambda example, idx: {"sentence2": f"{idx}: " + example["sentence2"]}, with_indices=True, num_proc=4)
+```
+
 The [`~Dataset.map`] also works with the rank of the process if you set `with_rank=True`. This is analogous to the `with_indices` parameter. The `with_rank` parameter in the mapped function goes after the `index` one if it is already present. 
 
 ```py
->>> from multiprocess import set_start_method
 >>> import torch
->>> import os
+>>> from multiprocess import set_start_method
+>>> from transformers import AutoTokenizer, AutoModelForCausalLM 
+>>> from datasets import load_dataset
+>>> 
+>>> # Get an example dataset
+>>> dataset = load_dataset("fka/awesome-chatgpt-prompts", split="train")
+>>> 
+>>> # Get an example model and its tokenizer 
+>>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen1.5-0.5B-Chat").eval()
+>>> tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-0.5B-Chat")
 >>>
->>> set_start_method("spawn")
+>>> def gpu_computation(batch, rank):
+...     # Move the model on the right GPU if it's not there already
+...     device = f"cuda:{(rank or 0) % torch.cuda.device_count()}"
+...     model.to(device)
+...     
+...     # Your big GPU call goes here, for example:
+...     chats = [[
+...         {"role": "system", "content": "You are a helpful assistant."},
+...         {"role": "user", "content": prompt}
+...     ] for prompt in batch["prompt"]]
+...     texts = [tokenizer.apply_chat_template(
+...         chat,
+...         tokenize=False,
+...         add_generation_prompt=True
+...     ) for chat in chats]
+...     model_inputs = tokenizer(texts, padding=True, return_tensors="pt").to(device)
+...     with torch.no_grad():
+...         outputs = model.generate(**model_inputs, max_new_tokens=512)
+...     batch["output"] = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+...     return batch
 >>>
->>> def gpu_computation(example, rank):
->>>     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank % torch.cuda.device_count())
->>>     # Your big GPU call goes here
->>>     return examples
->>>
->>> updated_dataset = dataset.map(gpu_computation, with_rank=True)
+>>> if __name__ == "__main__":
+...     set_start_method("spawn")
+...     updated_dataset = dataset.map(
+...         gpu_computation,
+...         batched=True,
+...         batch_size=16,
+...         with_rank=True,
+...         num_proc=torch.cuda.device_count(),  # one process per GPU
+...     )
 ```
 
 The main use-case for rank is to parallelize computation across several GPUs. This requires setting `multiprocess.set_start_method("spawn")`. If you don't you'll receive the following CUDA error: 
 
 ```bash
 RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method.
-```
-
-### Multiprocessing
-
-Multiprocessing significantly speeds up processing by parallelizing processes on the CPU. Set the `num_proc` parameter in [`~Dataset.map`] to set the number of processes to use:
-
-```py
->>> updated_dataset = dataset.map(lambda example, idx: {"sentence2": f"{idx}: " + example["sentence2"]}, num_proc=4)
 ```
 
 ### Batch processing
@@ -395,7 +447,10 @@ Dataset({
  num_rows: 3668
 })
 >>> chunked_dataset
-Dataset(schema: {'chunks': 'string'}, num_rows: 10470)
+Dataset({
+    features: ['chunks'],
+    num_rows: 10470
+})
 ```
 
 #### Data augmentation
@@ -491,6 +546,32 @@ The following example shows how you can use `torch.distributed.barrier` to synch
 ...     torch.distributed.barrier()
 ```
 
+## Batch
+
+The [`~Dataset.batch`] method allows you to group samples from the dataset into batches. This is particularly useful when you want to create batches of data for training or evaluation, especially when working with deep learning models.
+
+Here's an example of how to use the `batch()` method:
+
+```python
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("rotten_tomatoes", split="train")
+>>> batched_dataset = dataset.batch(batch_size=4)
+>>> batched_dataset[0]
+{'text': ['the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .',
+        'the gorgeously elaborate continuation of " the lord of the rings " trilogy is so huge that a column of words cannot adequately describe co-writer/director peter jackson\'s expanded vision of j . r . r . tolkien\'s middle-earth .',
+        'effective but too-tepid biopic',
+        'if you sometimes like to go to the movies to have fun , wasabi is a good place to start .'],
+'label': [1, 1, 1, 1]}
+```
+
+The `batch()` method accepts the following parameters:
+
+- `batch_size` (`int`): The number of samples in each batch.
+- `drop_last_batch` (`bool`, defaults to `False`): Whether to drop the last incomplete batch if the dataset size is not divisible by the batch size.
+- `num_proc` (`int`, optional, defaults to `None`): The number of processes to use for multiprocessing. If None, no multiprocessing is used. This can significantly speed up batching for large datasets.
+
+Note that `Dataset.batch()` returns a new [`Dataset`] where each item is a batch of multiple samples from the original dataset. If you want to process data in batches, you should use a batched [`~Dataset.map`] directly, which applies a function to batches but the output dataset is unbatched.
+
 ## Concatenate
 
 Separate datasets can be concatenated if they share the same column types. Concatenate datasets with [`concatenate_datasets`]:
@@ -523,6 +604,7 @@ You can define sampling probabilities for each of the original datasets to speci
 In this case, the new dataset is constructed by getting examples one by one from a random dataset until one of the datasets runs out of samples.
 
 ```py
+>>> from datasets import Dataset, interleave_datasets
 >>> seed = 42
 >>> probabilities = [0.3, 0.5, 0.2]
 >>> d1 = Dataset.from_dict({"a": [0, 1, 2]})
@@ -588,7 +670,7 @@ The [`~Dataset.set_transform`] function applies a custom formatting transform on
 
 >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 >>> def encode(batch):
-...     return tokenizer(batch["sentence1"], padding="longest", truncation=True, max_length=512, return_tensors="pt")
+...     return tokenizer(batch["sentence1"], batch["sentence2"], padding="longest", truncation=True, max_length=512, return_tensors="pt")
 >>> dataset.set_transform(encode)
 >>> dataset.format
 {'type': 'custom', 'format_kwargs': {'transform': <function __main__.encode(batch)>}, 'columns': ['idx', 'label', 'sentence1', 'sentence2'], 'output_all_columns': False}
@@ -654,7 +736,7 @@ Want to save your dataset to a cloud storage provider? Read our [Cloud Storage](
 | JSON                    | [`Dataset.to_json`]                                   |
 | Parquet                 | [`Dataset.to_parquet`]                                |
 | SQL                     | [`Dataset.to_sql`]                                    |
-| In-memory Python object | [`Dataset.to_pandas`] or [`Dataset.to_dict`] |
+| In-memory Python object | [`Dataset.to_pandas`], [`Dataset.to_polars`] or [`Dataset.to_dict`] |
 
 For example, export your dataset to a CSV file like this:
 

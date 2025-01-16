@@ -1,7 +1,6 @@
 from typing import List
 
 import datasets
-from datasets.tasks import ImageClassification
 
 from ..folder_based_builder import folder_based_builder
 
@@ -15,13 +14,15 @@ class ImageFolderConfig(folder_based_builder.FolderBasedBuilderConfig):
     drop_labels: bool = None
     drop_metadata: bool = None
 
+    def __post_init__(self):
+        super().__post_init__()
+
 
 class ImageFolder(folder_based_builder.FolderBasedBuilder):
-    BASE_FEATURE = datasets.Image()
+    BASE_FEATURE = datasets.Image
     BASE_COLUMN_NAME = "image"
     BUILDER_CONFIG_CLASS = ImageFolderConfig
     EXTENSIONS: List[str]  # definition at the bottom of the script
-    CLASSIFICATION_TASK = ImageClassification(image_column="image", label_column="label")
 
 
 # Obtained with:
@@ -56,8 +57,8 @@ IMAGE_EXTENSIONS = [
     ".gbr",
     ".gif",
     ".grib",
-    ".h5",
-    ".hdf",
+    # ".h5",   # may contain zero or several images
+    # ".hdf",  # may contain zero or several images
     ".png",
     ".apng",
     ".jp2",

@@ -20,12 +20,12 @@ import pyarrow as pa
 
 from .. import config
 from ..utils.py_utils import map_nested
-from .formatting import Formatter
+from .formatting import TensorFormatter
 
 
-class NumpyFormatter(Formatter[Mapping, np.ndarray, Mapping]):
-    def __init__(self, features=None, **np_array_kwargs):
-        super().__init__(features=features)
+class NumpyFormatter(TensorFormatter[Mapping, np.ndarray, Mapping]):
+    def __init__(self, features=None, token_per_repo_id=None, **np_array_kwargs):
+        super().__init__(features=features, token_per_repo_id=token_per_repo_id)
         self.np_array_kwargs = np_array_kwargs
 
     def _consolidate(self, column):
@@ -57,23 +57,45 @@ class NumpyFormatter(Formatter[Mapping, np.ndarray, Mapping]):
             default_dtype = {"dtype": np.int64}
         elif isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.floating):
             default_dtype = {"dtype": np.float32}
-        elif config.PIL_AVAILABLE and "PIL" in sys.modules:
+
+        if config.PIL_AVAILABLE and "PIL" in sys.modules:
             import PIL.Image
 
             if isinstance(value, PIL.Image.Image):
                 return np.asarray(value, **self.np_array_kwargs)
+        if config.DECORD_AVAILABLE and "decord" in sys.modules:
+            # We need to import torch first, otherwise later it can cause issues
+            # e.g. "RuntimeError: random_device could not be read"
+            # when running `torch.tensor(value).share_memory_()`
+            if config.TORCH_AVAILABLE:
+                import torch  # noqa
+            from decord import VideoReader
 
-        return np.array(value, **{**default_dtype, **self.np_array_kwargs})
+            if isinstance(value, VideoReader):
+                value._hf_bridge_out = np.asarray
+                return value
 
-    def _recursive_tensorize(self, data_struct: dict):
+        return np.asarray(value, **{**default_dtype, **self.np_array_kwargs})
+
+    def _recursive_tensorize(self, data_struct):
+        # support for torch, tf, jax etc.
+        if config.TORCH_AVAILABLE and "torch" in sys.modules:
+            import torch
+
+            if isinstance(data_struct, torch.Tensor):
+                return self._tensorize(data_struct.detach().cpu().numpy()[()])
+        if hasattr(data_struct, "__array__") and not isinstance(data_struct, (np.ndarray, np.character, np.number)):
+            data_struct = data_struct.__array__()
         # support for nested types like struct of list of struct
         if isinstance(data_struct, np.ndarray):
-            if data_struct.dtype == object:  # torch tensors cannot be instantied from an array of objects
+            if data_struct.dtype == object:
                 return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
+        if isinstance(data_struct, (list, tuple)):
+            return self._consolidate([self.recursive_tensorize(substruct) for substruct in data_struct])
         return self._tensorize(data_struct)
 
     def recursive_tensorize(self, data_struct: dict):
-        return map_nested(self._recursive_tensorize, data_struct)
+        return map_nested(self._recursive_tensorize, data_struct, map_list=False)
 
     def format_row(self, pa_table: pa.Table) -> Mapping:
         row = self.numpy_arrow_extractor().extract_row(pa_table)

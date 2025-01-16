@@ -12,9 +12,8 @@
 
 # Lint as: python3
 """To write records into Parquet files."""
-import errno
+
 import json
-import os
 import sys
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -22,12 +21,14 @@ import fsspec
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from fsspec.core import url_to_fs
 
 from . import config
-from .features import Features, Image, Value
+from .features import Audio, Features, Image, Value, Video
 from .features.features import (
     FeatureType,
     _ArrayXDExtensionType,
+    _visit,
     cast_to_python_objects,
     generate_from_arrow_type,
     get_nested_type,
@@ -38,15 +39,53 @@ from .features.features import (
 from .filesystems import is_remote_filesystem
 from .info import DatasetInfo
 from .keyhash import DuplicatedKeysError, KeyHasher
-from .table import array_cast, array_concat, cast_array_to_feature, embed_table_storage, table_cast
+from .table import array_cast, cast_array_to_feature, embed_table_storage, table_cast
 from .utils import logging
-from .utils.file_utils import hash_url_to_filename
 from .utils.py_utils import asdict, first_non_null_value
 
 
 logger = logging.get_logger(__name__)
 
 type_ = type  # keep python's type function
+
+
+def get_writer_batch_size(features: Optional[Features]) -> Optional[int]:
+    """
+    Get the writer_batch_size that defines the maximum row group size in the parquet files.
+    The default in `datasets` is 1,000 but we lower it to 100 for image/audio datasets and 10 for videos.
+    This allows to optimize random access to parquet file, since accessing 1 row requires
+    to read its entire row group.
+
+    This can be improved to get optimized size for querying/iterating
+    but at least it matches the dataset viewer expectations on HF.
+
+    Args:
+        features (`datasets.Features` or `None`):
+            Dataset Features from `datasets`.
+    Returns:
+        writer_batch_size (`Optional[int]`):
+            Writer batch size to pass to a dataset builder.
+            If `None`, then it will use the `datasets` default.
+    """
+    if not features:
+        return None
+
+    batch_size = np.inf
+
+    def set_batch_size(feature: FeatureType) -> None:
+        nonlocal batch_size
+        if isinstance(feature, Image):
+            batch_size = min(batch_size, config.PARQUET_ROW_GROUP_SIZE_FOR_IMAGE_DATASETS)
+        elif isinstance(feature, Audio):
+            batch_size = min(batch_size, config.PARQUET_ROW_GROUP_SIZE_FOR_AUDIO_DATASETS)
+        elif isinstance(feature, Video):
+            batch_size = min(batch_size, config.PARQUET_ROW_GROUP_SIZE_FOR_VIDEO_DATASETS)
+        elif isinstance(feature, Value) and feature.dtype == "binary":
+            batch_size = min(batch_size, config.PARQUET_ROW_GROUP_SIZE_FOR_BINARY_DATASETS)
+
+    _visit(features, set_batch_size)
+
+    return None if batch_size is np.inf else batch_size
 
 
 class SchemaInferenceError(ValueError):
@@ -201,7 +240,9 @@ class TypedSequence:
                 # We use cast_array_to_feature to support casting to custom types like Audio and Image
                 # Also, when trying type "string", we don't want to convert integers or floats to "string".
                 # We only do it if trying_type is False - since this is what the user asks for.
-                out = cast_array_to_feature(out, type, allow_number_to_str=not self.trying_type)
+                out = cast_array_to_feature(
+                    out, type, allow_primitive_to_str=not self.trying_type, allow_decimal_to_str=not self.trying_type
+                )
             return out
         except (
             TypeError,
@@ -237,7 +278,9 @@ class TypedSequence:
                             cast_to_python_objects(data, only_1d_for_numpy=True, optimize_list_casting=False)
                         )
                         if type is not None:
-                            out = cast_array_to_feature(out, type, allow_number_to_str=True)
+                            out = cast_array_to_feature(
+                                out, type, allow_primitive_to_str=True, allow_decimal_to_str=True
+                            )
                         return out
                     else:
                         raise
@@ -252,7 +295,7 @@ class TypedSequence:
             elif trying_cast_to_python_objects and "Could not convert" in str(e):
                 out = pa.array(cast_to_python_objects(data, only_1d_for_numpy=True, optimize_list_casting=False))
                 if type is not None:
-                    out = cast_array_to_feature(out, type, allow_number_to_str=True)
+                    out = cast_array_to_feature(out, type, allow_primitive_to_str=True, allow_decimal_to_str=True)
                 return out
             else:
                 raise
@@ -324,14 +367,10 @@ class ArrowWriter:
         self._disable_nullable = disable_nullable
 
         if stream is None:
-            fs_token_paths = fsspec.get_fs_token_paths(path, storage_options=storage_options)
-            self._fs: fsspec.AbstractFileSystem = fs_token_paths[0]
-            self._path = (
-                fs_token_paths[2][0]
-                if not is_remote_filesystem(self._fs)
-                else self._fs.unstrip_protocol(fs_token_paths[2][0])
-            )
-            self.stream = self._fs.open(fs_token_paths[2][0], "wb")
+            fs, path = url_to_fs(path, **(storage_options or {}))
+            self._fs: fsspec.AbstractFileSystem = fs
+            self._path = path if not is_remote_filesystem(self._fs) else self._fs.unstrip_protocol(path)
+            self.stream = self._fs.open(path, "wb")
             self._closable_stream = True
         else:
             self._fs = None
@@ -341,7 +380,9 @@ class ArrowWriter:
 
         self.fingerprint = fingerprint
         self.disable_nullable = disable_nullable
-        self.writer_batch_size = writer_batch_size or config.DEFAULT_MAX_BATCH_SIZE
+        self.writer_batch_size = (
+            writer_batch_size or get_writer_batch_size(self._features) or config.DEFAULT_MAX_BATCH_SIZE
+        )
         self.update_features = update_features
         self.with_metadata = with_metadata
         self.unit = unit
@@ -424,14 +465,15 @@ class ArrowWriter:
         """Write stored examples from the write-pool of examples. It makes a table out of the examples and write it."""
         if not self.current_examples:
             return
-
-        # order the columns properly
-        cols = (
-            [col for col in self.schema.names if col in self.current_examples[0][0]]
-            + [col for col in self.current_examples[0][0].keys() if col not in self.schema.names]
-            if self.schema
-            else self.current_examples[0][0].keys()
-        )
+        # preserve the order the columns
+        if self.schema:
+            schema_cols = set(self.schema.names)
+            examples_cols = self.current_examples[0][0].keys()  # .keys() preserves the order (unlike set)
+            common_cols = [col for col in self.schema.names if col in examples_cols]
+            extra_cols = [col for col in examples_cols if col not in schema_cols]
+            cols = common_cols + extra_cols
+        else:
+            cols = list(self.current_examples[0][0])
         batch_examples = {}
         for col in cols:
             # We use row[0][col] since current_examples contains (example, key) tuples.
@@ -439,7 +481,12 @@ class ArrowWriter:
             # This can happen in `.map()` when we want to re-write the same Arrow data
             if all(isinstance(row[0][col], (pa.Array, pa.ChunkedArray)) for row in self.current_examples):
                 arrays = [row[0][col] for row in self.current_examples]
-                batch_examples[col] = array_concat(arrays)
+                arrays = [
+                    chunk
+                    for array in arrays
+                    for chunk in (array.chunks if isinstance(array, pa.ChunkedArray) else [array])
+                ]
+                batch_examples[col] = pa.concat_arrays(arrays)
             else:
                 batch_examples[col] = [
                     row[0][col].to_pylist()[0] if isinstance(row[0][col], (pa.Array, pa.ChunkedArray)) else row[0][col]
@@ -510,6 +557,8 @@ class ArrowWriter:
         Args:
             row: the row to add.
         """
+        if len(row) != 1:
+            raise ValueError(f"Only single-row pyarrow tables are allowed but got table with {len(row)} rows.")
         self.current_rows.append(row)
         if writer_batch_size is None:
             writer_batch_size = self.writer_batch_size
@@ -534,12 +583,15 @@ class ArrowWriter:
         try_features = self._features if self.pa_writer is None and self.update_features else None
         arrays = []
         inferred_features = Features()
-        cols = (
-            [col for col in self.schema.names if col in batch_examples]
-            + [col for col in batch_examples.keys() if col not in self.schema.names]
-            if self.schema
-            else batch_examples.keys()
-        )
+        # preserve the order the columns
+        if self.schema:
+            schema_cols = set(self.schema.names)
+            batch_cols = batch_examples.keys()  # .keys() preserves the order (unlike set)
+            common_cols = [col for col in self.schema.names if col in batch_cols]
+            extra_cols = [col for col in batch_cols if col not in schema_cols]
+            cols = common_cols + extra_cols
+        else:
+            cols = list(batch_examples)
         for col in cols:
             col_values = batch_examples[col]
             col_type = features[col] if features else None
@@ -602,142 +654,3 @@ class ArrowWriter:
 
 class ParquetWriter(ArrowWriter):
     _WRITER_CLASS = pq.ParquetWriter
-
-
-class BeamWriter:
-    """
-    Shuffles and writes Examples to Arrow files.
-    The Arrow files are converted from Parquet files that are the output of Apache Beam pipelines.
-    """
-
-    def __init__(
-        self,
-        features: Optional[Features] = None,
-        schema: Optional[pa.Schema] = None,
-        path: Optional[str] = None,
-        namespace: Optional[str] = None,
-        cache_dir: Optional[str] = None,
-    ):
-        if features is None and schema is None:
-            raise ValueError("At least one of features and schema must be provided.")
-        if path is None:
-            raise ValueError("Path must be provided.")
-
-        if features is not None:
-            self._features: Features = features
-            self._schema: pa.Schema = features.arrow_schema
-        else:
-            self._schema: pa.Schema = schema
-            self._features: Features = Features.from_arrow_schema(schema)
-
-        self._path = path
-        self._parquet_path = os.path.splitext(path)[0]  # remove extension
-        self._namespace = namespace or "default"
-        self._num_examples = None
-        self._cache_dir = cache_dir or config.HF_DATASETS_CACHE
-
-    def write_from_pcollection(self, pcoll_examples):
-        """Add the final steps of the beam pipeline: write to parquet files."""
-        import apache_beam as beam
-
-        def inc_num_examples(example):
-            beam.metrics.Metrics.counter(self._namespace, "num_examples").inc()
-
-        # count examples
-        _ = pcoll_examples | "Count N. Examples" >> beam.Map(inc_num_examples)
-
-        # save dataset
-        return (
-            pcoll_examples
-            | "Get values" >> beam.Values()
-            | "Save to parquet"
-            >> beam.io.parquetio.WriteToParquet(
-                self._parquet_path, self._schema, shard_name_template="-SSSSS-of-NNNNN.parquet"
-            )
-        )
-
-    def finalize(self, metrics_query_result: dict):
-        """
-        Run after the pipeline has finished.
-        It converts the resulting parquet files to arrow and it completes the info from the pipeline metrics.
-
-        Args:
-            metrics_query_result: `dict` obtained from pipeline_results.metrics().query(m_filter). Make sure
-                that the filter keeps only the metrics for the considered split, under the namespace `split_name`.
-        """
-        import apache_beam as beam
-
-        from .utils import beam_utils
-
-        shards_metadata = list(
-            beam.io.filesystems.FileSystems.match([self._parquet_path + "*.parquet"])[0].metadata_list
-        )
-        shards = [metadata.path for metadata in shards_metadata]
-        num_bytes = sum([metadata.size_in_bytes for metadata in shards_metadata])
-        shard_lengths = get_parquet_lengths(shards)
-
-        # Convert to arrow
-        if self._path.endswith(".arrow"):
-            logger.info(f"Converting parquet files {self._parquet_path} to arrow {self._path}")
-            shards = [
-                metadata.path
-                for metadata in beam.io.filesystems.FileSystems.match([self._parquet_path + "*.parquet"])[
-                    0
-                ].metadata_list
-            ]
-            try:  # stream conversion
-                disable = not logging.is_progress_bar_enabled()
-                num_bytes = 0
-                for shard in logging.tqdm(shards, unit="shards", disable=disable):
-                    with beam.io.filesystems.FileSystems.open(shard) as source:
-                        with beam.io.filesystems.FileSystems.create(
-                            shard.replace(".parquet", ".arrow")
-                        ) as destination:
-                            shard_num_bytes, _ = parquet_to_arrow(source, destination)
-                            num_bytes += shard_num_bytes
-            except OSError as e:  # broken pipe can happen if the connection is unstable, do local conversion instead
-                if e.errno != errno.EPIPE:  # not a broken pipe
-                    raise
-                logger.warning(
-                    "Broken Pipe during stream conversion from parquet to arrow. Using local convert instead"
-                )
-                local_convert_dir = os.path.join(self._cache_dir, "beam_convert")
-                os.makedirs(local_convert_dir, exist_ok=True)
-                disable = not logging.is_progress_bar_enabled()
-                num_bytes = 0
-                for shard in logging.tqdm(shards, unit="shards", disable=disable):
-                    local_parquet_path = os.path.join(local_convert_dir, hash_url_to_filename(shard) + ".parquet")
-                    beam_utils.download_remote_to_local(shard, local_parquet_path)
-                    local_arrow_path = local_parquet_path.replace(".parquet", ".arrow")
-                    shard_num_bytes, _ = parquet_to_arrow(local_parquet_path, local_arrow_path)
-                    num_bytes += shard_num_bytes
-                    remote_arrow_path = shard.replace(".parquet", ".arrow")
-                    beam_utils.upload_local_to_remote(local_arrow_path, remote_arrow_path)
-
-        # Save metrics
-        counters_dict = {metric.key.metric.name: metric.result for metric in metrics_query_result["counters"]}
-        self._num_examples = counters_dict["num_examples"]
-        self._num_bytes = num_bytes
-        self._shard_lengths = shard_lengths
-        return self._num_examples, self._num_bytes
-
-
-def get_parquet_lengths(sources) -> List[int]:
-    shard_lengths = []
-    disable = not logging.is_progress_bar_enabled()
-    for source in logging.tqdm(sources, unit="parquet files", disable=disable):
-        parquet_file = pa.parquet.ParquetFile(source)
-        shard_lengths.append(parquet_file.metadata.num_rows)
-    return shard_lengths
-
-
-def parquet_to_arrow(source, destination) -> List[int]:
-    """Convert parquet file to arrow file. Inputs can be str paths or file-like objects"""
-    stream = None if isinstance(destination, str) else destination
-    with ArrowWriter(path=destination, stream=stream) as writer:
-        parquet_file = pa.parquet.ParquetFile(source)
-        for record_batch in parquet_file.iter_batches():
-            pa_table = pa.Table.from_batches([record_batch])
-            writer.write_table(pa_table)
-        num_bytes, num_examples = writer.finalize()
-    return num_bytes, num_examples

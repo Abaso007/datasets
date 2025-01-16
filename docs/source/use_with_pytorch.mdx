@@ -38,21 +38,31 @@ To load the data as tensors on a GPU, specify the `device` argument:
 {'data': tensor([1, 2], device='cuda:0')}
 ```
 
-## N-dimensional arrays
+### N-dimensional arrays
 
-If your dataset consists of N-dimensional arrays, you will see that by default they are considered as nested lists.
-In particular, a PyTorch formatted dataset outputs nested lists instead of a single tensor:
+If your dataset consists of N-dimensional arrays, you will see that by default they are considered as the same tensor if the shape is fixed:
 
 ```py
 >>> from datasets import Dataset
->>> data = [[[1, 2],[3, 4]],[[5, 6],[7, 8]]]
+>>> data = [[[1, 2],[3, 4]],[[5, 6],[7, 8]]]  # fixed shape
 >>> ds = Dataset.from_dict({"data": data})
 >>> ds = ds.with_format("torch")
 >>> ds[0]
-{'data': [tensor([1, 2]), tensor([3, 4])]}
+{'data': tensor([[1, 2],
+         [3, 4]])}
 ```
 
-To get a single tensor, you must explicitly use the [`Array`] feature type and specify the shape of your tensors:
+```py
+>>> from datasets import Dataset
+>>> data = [[[1, 2],[3]],[[4, 5, 6],[7, 8]]]  # varying shape
+>>> ds = Dataset.from_dict({"data": data})
+>>> ds = ds.with_format("torch")
+>>> ds[0]
+{'data': [tensor([1, 2]), tensor([3])]}
+```
+
+However this logic often requires slow shape comparisons and data copies.
+To avoid this, you must explicitly use the [`Array`] feature type and specify the shape of your tensors:
 
 ```py
 >>> from datasets import Dataset, Features, Array2D
@@ -72,7 +82,7 @@ To get a single tensor, you must explicitly use the [`Array`] feature type and s
 ```
 
 
-## Other feature types
+### Other feature types
 
 [`ClassLabel`] data are properly converted to tensors:
 
@@ -184,37 +194,6 @@ Reloading the dataset inside a worker doesn't fill up your RAM, since it simply 
 >>> dataloader = DataLoader(ds, batch_size=32, num_workers=4)
 ```
 
-#### Use a BatchSampler (torch<=1.12.1)
-
-For old versions of PyTorch, using a `BatchSampler` can speed up data loading.
-Indeed if you are using `torch<=1.12.1`, the PyTorch `DataLoader` load batches of data from a dataset one by one like this:
-
-```py
-batch = [dataset[idx] for idx in range(start, end)]
-```
-
-Unfortunately, this does numerous read operations on the dataset.
-It is more efficient to query batches of examples using a list:
-
-```py
-batch = dataset[start:end]
-# or
-batch = dataset[list_of_indices]
-```
-
-For the PyTorch `DataLoader` to query batches using a list, you can use a `BatchSampler`:
-
-```py
->>> from torch.utils.data.sampler import BatchSampler, RandomSampler
->>> batch_sampler = BatchSampler(RandomSampler(ds), batch_size=32, drop_last=False)
->>> dataloader = DataLoader(ds, batch_sampler=batch_sampler)
-```
-
-Moreover, this is particularly useful if you used [`set_transform`] to apply a transform on-the-fly when examples are accessed.
-You must use a `BatchSampler` if you want the transform to be given full batches instead of receiving `batch_size` times one single element.
-
-Recent versions of PyTorch use a list of indices, so a `BatchSampler` is not needed to get the best speed even if you used [`set_transform`].
-
 ### Stream data
 
 Stream a dataset by loading it as an [`IterableDataset`]. This allows you to progressively iterate over a remote dataset without downloading it on disk and or over local data files.
@@ -236,13 +215,29 @@ An iterable dataset from `datasets` inherits from `torch.utils.data.IterableData
 If the dataset is split in several shards (i.e. if the dataset consists of multiple data files), then you can stream in parallel using `num_workers`:
 
 ```py
->>> my_iterable_dataset = load_dataset("c4", "en", streaming=True, split="train")
->>> my_iterable_dataset.n_shards
-1024
+>>> my_iterable_dataset = load_dataset("deepmind/code_contests", streaming=True, split="train")
+>>> my_iterable_dataset.num_shards
+39
 >>> dataloader = DataLoader(my_iterable_dataset, batch_size=32, num_workers=4)
 ```
 
 In this case each worker is given a subset of the list of shards to stream from.
+
+### Checkpoint and resume
+
+If you need a DataLoader that you can checkpoint and resume in the middle of training, you can use the `StatefulDataLoader` from [torchdata](https://github.com/pytorch/data):
+
+```py
+>>> from torchdata.stateful_dataloader import StatefulDataLoader
+>>> my_iterable_dataset = load_dataset("deepmind/code_contests", streaming=True, split="train")
+>>> dataloader = StatefulDataLoader(my_iterable_dataset, batch_size=32, num_workers=4)
+>>> # save in the middle of training
+>>> state_dict = dataloader.state_dict()
+>>> # and resume later
+>>> dataloader.load_state_dict(state_dict)
+```
+
+This is possible thanks to [`IterableDataset.state_dict`] and [`IterableDataset.load_state_dict`].
 
 ### Distributed
 
@@ -264,7 +259,7 @@ Each node is assigned a chunk of data, e.g. rank 0 is given the first chunk of t
 
 For iterable datasets:
 
-If the dataset has a number of shards that is a factor of `world_size` (i.e. if `dataset.n_shards % world_size == 0`),
+If the dataset has a number of shards that is a factor of `world_size` (i.e. if `dataset.num_shards % world_size == 0`),
 then the shards are evenly assigned across the nodes, which is the most optimized.
 Otherwise, each node keeps 1 example out of `world_size`, skipping the other examples.
 

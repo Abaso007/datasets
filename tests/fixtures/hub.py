@@ -1,10 +1,13 @@
+import os
 import time
+import uuid
 from contextlib import contextmanager
-from pathlib import Path
+from typing import Optional
 
 import pytest
 import requests
-from huggingface_hub.hf_api import HfApi, HfFolder
+from huggingface_hub.hf_api import HfApi, RepositoryNotFoundError
+from huggingface_hub.utils import hf_raise_for_status
 
 
 CI_HUB_USER = "__DUMMY_TRANSFORMERS_USER__"
@@ -14,7 +17,6 @@ CI_HUB_USER_TOKEN = "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"
 CI_HUB_ENDPOINT = "https://hub-ci.huggingface.co"
 CI_HUB_DATASETS_URL = CI_HUB_ENDPOINT + "/datasets/{repo_id}/resolve/{revision}/{path}"
 CI_HFH_HUGGINGFACE_CO_URL_TEMPLATE = CI_HUB_ENDPOINT + "/{repo_id}/resolve/{revision}/{filename}"
-CI_HUB_TOKEN_PATH = Path("~/.huggingface/hub_ci_token").expanduser()
 
 
 @pytest.fixture
@@ -31,15 +33,14 @@ def ci_hub_config(monkeypatch):
 
 
 @pytest.fixture
-def ci_hub_token_path(monkeypatch):
-    monkeypatch.setattr("huggingface_hub.hf_api.HfFolder.path_token", CI_HUB_TOKEN_PATH)
-
-
-@pytest.fixture
-def set_ci_hub_access_token(ci_hub_config, ci_hub_token_path):
-    HfFolder.save_token(CI_HUB_USER_TOKEN)
+def set_ci_hub_access_token(ci_hub_config, monkeypatch):
+    # Enable implicit token
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_DISABLE_IMPLICIT_TOKEN", False)
+    old_environ = dict(os.environ)
+    os.environ["HF_TOKEN"] = CI_HUB_USER_TOKEN
     yield
-    HfFolder.delete_token()
+    os.environ.clear()
+    os.environ.update(old_environ)
 
 
 @pytest.fixture(scope="session")
@@ -48,12 +49,8 @@ def hf_api():
 
 
 @pytest.fixture(scope="session")
-def hf_token(hf_api: HfApi):
-    previous_token = HfFolder.get_token()
-    HfFolder.save_token(CI_HUB_USER_TOKEN)
+def hf_token():
     yield CI_HUB_USER_TOKEN
-    if previous_token is not None:
-        HfFolder.save_token(previous_token)
 
 
 @pytest.fixture
@@ -67,23 +64,59 @@ def cleanup_repo(hf_api):
 @pytest.fixture
 def temporary_repo(cleanup_repo):
     @contextmanager
-    def _temporary_repo(repo_id):
+    def _temporary_repo(repo_id: Optional[str] = None):
+        repo_id = repo_id or f"{CI_HUB_USER}/test-dataset-{uuid.uuid4().hex[:6]}-{int(time.time() * 10e3)}"
         try:
             yield repo_id
         finally:
-            cleanup_repo(repo_id)
+            try:
+                cleanup_repo(repo_id)
+            except RepositoryNotFoundError:
+                pass
 
     return _temporary_repo
 
 
 @pytest.fixture(scope="session")
-def hf_private_dataset_repo_txt_data_(hf_api: HfApi, hf_token, text_file):
-    repo_name = f"repo_txt_data-{int(time.time() * 10e3)}"
+def _hf_gated_dataset_repo_txt_data(hf_api: HfApi, hf_token, text_file_content):
+    repo_name = f"repo_txt_data-{int(time.time() * 10e6)}"
+    repo_id = f"{CI_HUB_USER}/{repo_name}"
+    hf_api.create_repo(repo_id, token=hf_token, repo_type="dataset")
+    hf_api.upload_file(
+        token=hf_token,
+        path_or_fileobj=text_file_content.encode(),
+        path_in_repo="data/text_data.txt",
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    path = f"{hf_api.endpoint}/api/datasets/{repo_id}/settings"
+    repo_settings = {"gated": "auto"}
+    r = requests.put(
+        path,
+        headers={"authorization": f"Bearer {hf_token}"},
+        json=repo_settings,
+    )
+    hf_raise_for_status(r)
+    yield repo_id
+    try:
+        hf_api.delete_repo(repo_id, token=hf_token, repo_type="dataset")
+    except (requests.exceptions.HTTPError, ValueError):  # catch http error and token invalid error
+        pass
+
+
+@pytest.fixture()
+def hf_gated_dataset_repo_txt_data(_hf_gated_dataset_repo_txt_data, ci_hub_config, ci_hfh_hf_hub_url):
+    return _hf_gated_dataset_repo_txt_data
+
+
+@pytest.fixture(scope="session")
+def hf_private_dataset_repo_txt_data_(hf_api: HfApi, hf_token, text_file_content):
+    repo_name = f"repo_txt_data-{int(time.time() * 10e6)}"
     repo_id = f"{CI_HUB_USER}/{repo_name}"
     hf_api.create_repo(repo_id, token=hf_token, repo_type="dataset", private=True)
     hf_api.upload_file(
         token=hf_token,
-        path_or_fileobj=str(text_file),
+        path_or_fileobj=text_file_content.encode(),
         path_in_repo="data/text_data.txt",
         repo_id=repo_id,
         repo_type="dataset",
@@ -102,7 +135,7 @@ def hf_private_dataset_repo_txt_data(hf_private_dataset_repo_txt_data_, ci_hub_c
 
 @pytest.fixture(scope="session")
 def hf_private_dataset_repo_zipped_txt_data_(hf_api: HfApi, hf_token, zip_csv_with_dir_path):
-    repo_name = f"repo_zipped_txt_data-{int(time.time() * 10e3)}"
+    repo_name = f"repo_zipped_txt_data-{int(time.time() * 10e6)}"
     repo_id = f"{CI_HUB_USER}/{repo_name}"
     hf_api.create_repo(repo_id, token=hf_token, repo_type="dataset", private=True)
     hf_api.upload_file(
@@ -128,7 +161,7 @@ def hf_private_dataset_repo_zipped_txt_data(
 
 @pytest.fixture(scope="session")
 def hf_private_dataset_repo_zipped_img_data_(hf_api: HfApi, hf_token, zip_image_path):
-    repo_name = f"repo_zipped_img_data-{int(time.time() * 10e3)}"
+    repo_name = f"repo_zipped_img_data-{int(time.time() * 10e6)}"
     repo_id = f"{CI_HUB_USER}/{repo_name}"
     hf_api.create_repo(repo_id, token=hf_token, repo_type="dataset", private=True)
     hf_api.upload_file(

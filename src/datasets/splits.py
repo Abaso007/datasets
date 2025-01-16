@@ -15,7 +15,6 @@
 # Lint as: python3
 """Splits related API."""
 
-
 import abc
 import collections
 import copy
@@ -31,9 +30,9 @@ from .utils.py_utils import NonMutableDict, asdict
 
 @dataclass
 class SplitInfo:
-    name: str = ""
-    num_bytes: int = 0
-    num_examples: int = 0
+    name: str = dataclasses.field(default="", metadata={"include_in_asdict_even_if_is_default": True})
+    num_bytes: int = dataclasses.field(default=0, metadata={"include_in_asdict_even_if_is_default": True})
+    num_examples: int = dataclasses.field(default=0, metadata={"include_in_asdict_even_if_is_default": True})
     shard_lengths: Optional[List[int]] = None
 
     # Deprecated
@@ -111,6 +110,7 @@ class SplitBase(metaclass=abc.ABCMeta):
              to define which files to read and how to skip examples within file.
 
     """
+
     # pylint: enable=line-too-long
 
     @abc.abstractmethod
@@ -265,6 +265,7 @@ class PercentSlice(metaclass=PercentSliceMeta):
     [guide on splits](../loading#slice-splits)
     for more information.
     """
+
     # pylint: enable=line-too-long
     pass
 
@@ -375,7 +376,7 @@ class NamedSplit(SplitBase):
         elif isinstance(other, str):  # Other should be string
             return self._name == other
         else:
-            raise ValueError(f"Equality not supported between split {self} and {other}")
+            return False
 
     def __lt__(self, other):
         return self._name < other._name  # pylint: disable=protected-access
@@ -438,6 +439,7 @@ class Split:
     ... )
     ```
     """
+
     # pylint: enable=line-too-long
     TRAIN = NamedSplit("train")
     TEST = NamedSplit("test")
@@ -476,7 +478,7 @@ class SplitReadInstruction:
     """
 
     def __init__(self, split_info=None):
-        self._splits = NonMutableDict(error_msg="Overlap between splits. Split {key} has been added with " "itself.")
+        self._splits = NonMutableDict(error_msg="Overlap between splits. Split {key} has been added with itself.")
 
         if split_info:
             self.add(SlicedSplitInfo(split_info=split_info, slice_value=None))
@@ -537,8 +539,6 @@ class SplitDict(dict):
     def __setitem__(self, key: Union[SplitBase, str], value: SplitInfo):
         if key != value.name:
             raise ValueError(f"Cannot add elem. (key mismatch: '{key}' != '{value.name}')")
-        if key in self:
-            raise ValueError(f"Split {key} already present")
         super().__setitem__(key, value)
 
     def add(self, split_info: SplitInfo):

@@ -2,6 +2,7 @@ import os
 import posixpath
 import uuid
 from dataclasses import dataclass
+from itertools import islice
 from typing import TYPE_CHECKING, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -15,6 +16,7 @@ from datasets.filesystems import (
     rename,
 )
 from datasets.iterable_dataset import _BaseExamplesIterable
+from datasets.utils import experimental
 from datasets.utils.py_utils import convert_file_size_to_int
 
 
@@ -22,6 +24,7 @@ logger = datasets.utils.logging.get_logger(__name__)
 
 if TYPE_CHECKING:
     import pyspark
+    import pyspark.sql
 
 
 @dataclass
@@ -30,24 +33,45 @@ class SparkConfig(datasets.BuilderConfig):
 
     features: Optional[datasets.Features] = None
 
+    def __post_init__(self):
+        super().__post_init__()
+
+
+def _reorder_dataframe_by_partition(df: "pyspark.sql.DataFrame", new_partition_order: List[int]):
+    df_combined = df.select("*").where(f"part_id = {new_partition_order[0]}")
+    for partition_id in new_partition_order[1:]:
+        partition_df = df.select("*").where(f"part_id = {partition_id}")
+        df_combined = df_combined.union(partition_df)
+    return df_combined
+
 
 def _generate_iterable_examples(
     df: "pyspark.sql.DataFrame",
     partition_order: List[int],
+    state_dict: Optional[dict] = None,
 ):
     import pyspark
 
-    def generate_fn():
-        df_with_partition_id = df.select("*", pyspark.sql.functions.spark_partition_id().alias("part_id"))
-        for partition_id in partition_order:
-            partition_df = df_with_partition_id.select("*").where(f"part_id = {partition_id}").drop("part_id")
-            rows = partition_df.collect()
+    df_with_partition_id = df.select("*", pyspark.sql.functions.spark_partition_id().alias("part_id"))
+    partition_idx_start = state_dict["partition_idx"] if state_dict else 0
+    partition_df = _reorder_dataframe_by_partition(df_with_partition_id, partition_order[partition_idx_start:])
+    # pipeline next partition in parallel to hide latency
+    rows = partition_df.toLocalIterator(prefetchPartitions=True)
+    curr_partition = None
+    row_id = state_dict["partition_example_idx"] if state_dict else 0
+    for row in islice(rows, row_id, None):
+        row_as_dict = row.asDict()
+        part_id = row_as_dict["part_id"]
+        row_as_dict.pop("part_id")
+        if curr_partition != part_id:
+            if state_dict and curr_partition is not None:
+                state_dict["partition_idx"] += 1
+            curr_partition = part_id
             row_id = 0
-            for row in rows:
-                yield f"{partition_id}_{row_id}", row.asDict()
-                row_id += 1
-
-    return generate_fn
+        if state_dict:
+            state_dict["partition_example_idx"] = row_id + 1
+        yield f"{part_id}_{row_id}", row_as_dict
+        row_id += 1
 
 
 class SparkExamplesIterable(_BaseExamplesIterable):
@@ -56,24 +80,32 @@ class SparkExamplesIterable(_BaseExamplesIterable):
         df: "pyspark.sql.DataFrame",
         partition_order=None,
     ):
+        super().__init__()
         self.df = df
         self.partition_order = partition_order or range(self.df.rdd.getNumPartitions())
-        self.generate_examples_fn = _generate_iterable_examples(self.df, self.partition_order)
+
+    def _init_state_dict(self) -> dict:
+        self._state_dict = {"partition_idx": 0, "partition_example_idx": 0}
+        return self._state_dict
+
+    @experimental
+    def load_state_dict(self, state_dict: dict) -> dict:
+        return super().load_state_dict(state_dict)
 
     def __iter__(self):
-        yield from self.generate_examples_fn()
+        yield from _generate_iterable_examples(self.df, self.partition_order, self._state_dict)
 
     def shuffle_data_sources(self, generator: np.random.Generator) -> "SparkExamplesIterable":
         partition_order = list(range(self.df.rdd.getNumPartitions()))
         generator.shuffle(partition_order)
         return SparkExamplesIterable(self.df, partition_order=partition_order)
 
-    def shard_data_sources(self, worker_id: int, num_workers: int) -> "SparkExamplesIterable":
-        partition_order = self.split_shard_indices_by_worker(worker_id, num_workers)
+    def shard_data_sources(self, num_shards: int, index: int, contiguous=True) -> "SparkExamplesIterable":
+        partition_order = self.split_shard_indices_by_worker(num_shards=num_shards, index=index, contiguous=contiguous)
         return SparkExamplesIterable(self.df, partition_order=partition_order)
 
     @property
-    def n_shards(self) -> int:
+    def num_shards(self) -> int:
         return len(self.partition_order)
 
 
@@ -100,12 +132,16 @@ class Spark(datasets.DatasetBuilder):
         )
 
     def _validate_cache_dir(self):
+        # Define this so that we don't reference self in create_cache_and_write_probe, which will result in a pickling
+        # error due to pickling the SparkContext.
+        cache_dir = self._cache_dir
+
         # Returns the path of the created file.
         def create_cache_and_write_probe(context):
             # makedirs with exist_ok will recursively create the directory. It will not throw an error if directories
             # already exist.
-            os.makedirs(self._cache_dir, exist_ok=True)
-            probe_file = os.path.join(self._cache_dir, "fs_test" + uuid.uuid4().hex)
+            os.makedirs(cache_dir, exist_ok=True)
+            probe_file = os.path.join(cache_dir, "fs_test" + uuid.uuid4().hex)
             # Opening the file in append mode will create a new file unless it already exists, in which case it will not
             # change the file contents.
             open(probe_file, "a")

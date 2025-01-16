@@ -25,33 +25,30 @@ import shutil
 import textwrap
 import time
 import urllib
-import warnings
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Mapping, Optional, Tuple, Union
+from unittest.mock import patch
 
 import fsspec
-import pyarrow as pa
+from fsspec.core import url_to_fs
 from multiprocess import Pool
 from tqdm.contrib.concurrent import thread_map
 
 from . import config, utils
 from .arrow_dataset import Dataset
 from .arrow_reader import (
-    HF_GCP_BASE_URL,
     ArrowReader,
-    DatasetNotOnHfGcsError,
-    MissingFilesOnHfGcsError,
     ReadInstruction,
 )
-from .arrow_writer import ArrowWriter, BeamWriter, ParquetWriter, SchemaInferenceError
-from .data_files import DataFilesDict, sanitize_patterns
+from .arrow_writer import ArrowWriter, ParquetWriter, SchemaInferenceError
+from .data_files import DataFilesDict, DataFilesPatternsDict, sanitize_patterns
 from .dataset_dict import DatasetDict, IterableDatasetDict
 from .download.download_config import DownloadConfig
 from .download.download_manager import DownloadManager, DownloadMode
-from .download.mock_download_manager import MockDownloadManager
-from .download.streaming_download_manager import StreamingDownloadManager, xopen
+from .download.streaming_download_manager import StreamingDownloadManager, xjoin
+from .exceptions import DatasetGenerationCastError, DatasetGenerationError, FileFormatError, ManualDownloadError
 from .features import Features
 from .filesystems import (
     is_remote_filesystem,
@@ -64,9 +61,11 @@ from .keyhash import DuplicatedKeysError
 from .naming import INVALID_WINDOWS_CHARACTERS_IN_PATH, camelcase_to_snakecase
 from .splits import Split, SplitDict, SplitGenerator, SplitInfo
 from .streaming import extend_dataset_builder_for_streaming
+from .table import CastError
 from .utils import logging
-from .utils.file_utils import cached_path, is_remote_url
-from .utils.filelock import FileLock
+from .utils import tqdm as hf_tqdm
+from .utils._filelock import FileLock
+from .utils.file_utils import is_remote_url
 from .utils.info_utils import VerificationMode, get_size_checksum_dict, verify_checksums, verify_splits
 from .utils.py_utils import (
     classproperty,
@@ -79,28 +78,17 @@ from .utils.py_utils import (
     temporary_assignment,
 )
 from .utils.sharding import _number_of_shards_in_gen_kwargs, _split_gen_kwargs
+from .utils.track import tracked_list
+
+
+if TYPE_CHECKING:
+    from .load import DatasetModule
 
 
 logger = logging.get_logger(__name__)
 
 
 class InvalidConfigName(ValueError):
-    pass
-
-
-class DatasetBuildError(Exception):
-    pass
-
-
-class ManualDownloadError(DatasetBuildError):
-    pass
-
-
-class DatasetGenerationError(DatasetBuildError):
-    pass
-
-
-class FileFormatError(DatasetBuildError):
     pass
 
 
@@ -127,7 +115,7 @@ class BuilderConfig:
     name: str = "default"
     version: Optional[Union[utils.Version, str]] = utils.Version("0.0.0")
     data_dir: Optional[str] = None
-    data_files: Optional[DataFilesDict] = None
+    data_files: Optional[Union[DataFilesDict, DataFilesPatternsDict]] = None
     description: Optional[str] = None
 
     def __post_init__(self):
@@ -138,7 +126,7 @@ class BuilderConfig:
                     f"Bad characters from black list '{INVALID_WINDOWS_CHARACTERS_IN_PATH}' found in '{self.name}'. "
                     f"They could create issues when creating a directory for this config on Windows filesystem."
                 )
-        if self.data_files is not None and not isinstance(self.data_files, DataFilesDict):
+        if self.data_files is not None and not isinstance(self.data_files, (DataFilesDict, DataFilesPatternsDict)):
             raise ValueError(f"Expected a DataFilesDict in data_files but got {self.data_files}")
 
     def __eq__(self, o):
@@ -212,6 +200,11 @@ class BuilderConfig:
         else:
             return self.name
 
+    def _resolve_data_files(self, base_path: str, download_config: DownloadConfig) -> None:
+        if isinstance(self.data_files, DataFilesPatternsDict):
+            base_path = xjoin(base_path, self.data_dir) if self.data_dir else base_path
+            self.data_files = self.data_files.resolve(base_path, download_config)
+
 
 class DatasetBuilder:
     """Abstract base class for all datasets.
@@ -232,6 +225,10 @@ class DatasetBuilder:
     Args:
         cache_dir (`str`, *optional*):
             Directory to cache data. Defaults to `"~/.cache/huggingface/datasets"`.
+        dataset_name (`str`, *optional*):
+            Name of the dataset, if different from the builder name. Useful for packaged builders
+            like csv, imagefolder, audiofolder, etc. to reflect the difference between datasets
+            that use the same packaged builder.
         config_name (`str`, *optional*):
             Name of the dataset configuration.
             It affects the data generated on disk. Different configurations will have their own subdirectories and
@@ -253,7 +250,7 @@ class DatasetBuilder:
         features ([`Features`], *optional*):
             Features types to use with this dataset.
             It can be used to change the [`Features`] types of a dataset, for example.
-        use_auth_token (`str` or `bool`, *optional*):
+        token (`str` or `bool`, *optional*):
             String or boolean to use as Bearer token for remote files on the
             Datasets Hub. If `True`, will get token from `"~/.huggingface"`.
         repo_id (`str`, *optional*):
@@ -277,14 +274,6 @@ class DatasetBuilder:
             It defines the number of samples that are kept in memory before writing them
             and also the length of the arrow chunks.
             None means that the ArrowWriter will use its default value.
-        name (`str`): Configuration name for the dataset.
-
-            <Deprecated version="2.3.0">
-
-            Use `config_name` instead.
-
-            </Deprecated>
-
         **config_kwargs (additional keyword arguments): Keyword arguments to be passed to the corresponding builder
             configuration class, set on the class attribute [`DatasetBuilder.BUILDER_CONFIG_CLASS`]. The builder
             configuration class is [`BuilderConfig`] or a subclass of it.
@@ -311,38 +300,35 @@ class DatasetBuilder:
     def __init__(
         self,
         cache_dir: Optional[str] = None,
+        dataset_name: Optional[str] = None,
         config_name: Optional[str] = None,
         hash: Optional[str] = None,
         base_path: Optional[str] = None,
         info: Optional[DatasetInfo] = None,
         features: Optional[Features] = None,
-        use_auth_token: Optional[Union[bool, str]] = None,
+        token: Optional[Union[bool, str]] = None,
         repo_id: Optional[str] = None,
         data_files: Optional[Union[str, list, dict, DataFilesDict]] = None,
         data_dir: Optional[str] = None,
         storage_options: Optional[dict] = None,
         writer_batch_size: Optional[int] = None,
-        name="deprecated",
         **config_kwargs,
     ):
-        if name != "deprecated":
-            warnings.warn(
-                "Parameter 'name' was renamed to 'config_name' in version 2.3.0 and will be removed in 3.0.0.",
-                category=FutureWarning,
-            )
-            config_name = name
         # DatasetBuilder name
         self.name: str = camelcase_to_snakecase(self.__module__.split(".")[-1])
         self.hash: Optional[str] = hash
         self.base_path = base_path
-        self.use_auth_token = use_auth_token
+        self.token = token
         self.repo_id = repo_id
-        self.storage_options = storage_options
+        self.storage_options = storage_options or {}
+        self.dataset_name = camelcase_to_snakecase(dataset_name) if dataset_name else self.name
         self._writer_batch_size = writer_batch_size or self.DEFAULT_WRITER_BATCH_SIZE
 
         if data_files is not None and not isinstance(data_files, DataFilesDict):
-            data_files = DataFilesDict.from_local_or_remote(
-                sanitize_patterns(data_files), base_path=base_path, use_auth_token=use_auth_token
+            data_files = DataFilesDict.from_patterns(
+                sanitize_patterns(data_files),
+                base_path=base_path,
+                download_config=DownloadConfig(token=token, storage_options=self.storage_options),
             )
 
         # Prepare config: DatasetConfig contains name, version and description but can be extended by each dataset
@@ -352,6 +338,7 @@ class DatasetBuilder:
             config_kwargs["data_files"] = data_files
         if data_dir is not None:
             config_kwargs["data_dir"] = data_dir
+        self.config_kwargs = config_kwargs
         self.config, self.config_id = self._create_builder_config(
             config_name=config_name,
             custom_features=features,
@@ -361,25 +348,26 @@ class DatasetBuilder:
         # prepare info: DatasetInfo are a standardized dataclass across all datasets
         # Prefill datasetinfo
         if info is None:
+            # TODO FOR PACKAGED MODULES IT IMPORTS DATA FROM src/packaged_modules which doesn't make sense
             info = self.get_exported_dataset_info()
             info.update(self._info())
-            info.builder_name = self.name
-            info.config_name = self.config.name
-            info.version = self.config.version
+        info.builder_name = self.name
+        info.dataset_name = self.dataset_name
+        info.config_name = self.config.name
+        info.version = self.config.version
         self.info = info
         # update info with user specified infos
         if features is not None:
             self.info.features = features
 
         # Prepare data dirs:
-        # cache_dir can be a remote bucket on GCS or S3 (when using BeamBasedBuilder for distributed data processing)
+        # cache_dir can be a remote bucket on GCS or S3
         self._cache_dir_root = str(cache_dir or config.HF_DATASETS_CACHE)
         self._cache_dir_root = (
             self._cache_dir_root if is_remote_url(self._cache_dir_root) else os.path.expanduser(self._cache_dir_root)
         )
-        path_join = posixpath.join if is_remote_url(self._cache_dir_root) else os.path.join
         self._cache_downloaded_dir = (
-            path_join(self._cache_dir_root, config.DOWNLOADED_DATASETS_DIR)
+            posixpath.join(self._cache_dir_root, config.DOWNLOADED_DATASETS_DIR)
             if cache_dir
             else str(config.DOWNLOADED_DATASETS_PATH)
         )
@@ -388,19 +376,25 @@ class DatasetBuilder:
             if is_remote_url(self._cache_downloaded_dir)
             else os.path.expanduser(self._cache_downloaded_dir)
         )
+
+        # In case there exists a legacy cache directory
+        self._legacy_relative_data_dir = None
+
         self._cache_dir = self._build_cache_dir()
         if not is_remote_url(self._cache_dir_root):
             os.makedirs(self._cache_dir_root, exist_ok=True)
-            lock_path = os.path.join(self._cache_dir_root, self._cache_dir.replace(os.sep, "_") + ".lock")
+            lock_path = os.path.join(
+                self._cache_dir_root, Path(self._cache_dir).as_posix().replace("/", "_") + ".lock"
+            )
             with FileLock(lock_path):
                 if os.path.exists(self._cache_dir):  # check if data exist
                     if len(os.listdir(self._cache_dir)) > 0:
-                        if os.path.exists(path_join(self._cache_dir, config.DATASET_INFO_FILENAME)):
+                        if os.path.exists(os.path.join(self._cache_dir, config.DATASET_INFO_FILENAME)):
                             logger.info("Overwrite dataset info from restored data version if exists.")
                             self.info = DatasetInfo.from_directory(self._cache_dir)
                     else:  # dir exists but no data, remove the empty dir as data aren't available anymore
                         logger.warning(
-                            f"Old caching folder {self._cache_dir} for dataset {self.name} exists but no data were found. Removing it. "
+                            f"Old caching folder {self._cache_dir} for dataset {self.dataset_name} exists but no data were found. Removing it. "
                         )
                         os.rmdir(self._cache_dir)
 
@@ -438,6 +432,76 @@ class DatasetBuilder:
     def manual_download_instructions(self) -> Optional[str]:
         return None
 
+    def _check_legacy_cache(self) -> Optional[str]:
+        """Check for the old cache directory template {cache_dir}/{namespace}___{builder_name} from 2.13"""
+        if (
+            self.__module__.startswith("datasets.")
+            and not is_remote_url(self._cache_dir_root)
+            and self.config.name == "default"
+        ):
+            from .packaged_modules import _PACKAGED_DATASETS_MODULES
+
+            namespace = self.repo_id.split("/")[0] if self.repo_id and self.repo_id.count("/") > 0 else None
+            config_name = self.repo_id.replace("/", "--") if self.repo_id is not None else self.dataset_name
+            config_id = config_name + self.config_id[len(self.config.name) :]
+            hash = _PACKAGED_DATASETS_MODULES.get(self.name, "missing")[1]
+            legacy_relative_data_dir = posixpath.join(
+                self.dataset_name if namespace is None else f"{namespace}___{self.dataset_name}",
+                config_id,
+                "0.0.0",
+                hash,
+            )
+            legacy_cache_dir = posixpath.join(self._cache_dir_root, legacy_relative_data_dir)
+            if os.path.isdir(legacy_cache_dir):
+                return legacy_relative_data_dir
+
+    def _check_legacy_cache2(self, dataset_module: "DatasetModule") -> Optional[str]:
+        """Check for the old cache directory template {cache_dir}/{namespace}___{dataset_name}/{config_name}-xxx from 2.14 and 2.15"""
+        if (
+            self.__module__.startswith("datasets.")
+            and not is_remote_url(self._cache_dir_root)
+            and not (set(self.config_kwargs) - {"data_files", "data_dir"})
+        ):
+            from .packaged_modules import _PACKAGED_DATASETS_MODULES_2_15_HASHES
+            from .utils._dill import Pickler
+
+            def update_hash_with_config_parameters(hash: str, config_parameters: dict) -> str:
+                """
+                Used to update hash of packaged modules which is used for creating unique cache directories to reflect
+                different config parameters which are passed in metadata from readme.
+                """
+                params_to_exclude = {"config_name", "version", "description"}
+                params_to_add_to_hash = {
+                    param: value
+                    for param, value in sorted(config_parameters.items())
+                    if param not in params_to_exclude
+                }
+                m = Hasher()
+                m.update(hash)
+                m.update(params_to_add_to_hash)
+                return m.hexdigest()
+
+            namespace = self.repo_id.split("/")[0] if self.repo_id and self.repo_id.count("/") > 0 else None
+            with patch.object(Pickler, "_legacy_no_dict_keys_sorting", True):
+                config_id = self.config.name + "-" + Hasher.hash({"data_files": self.config.data_files})
+            hash = _PACKAGED_DATASETS_MODULES_2_15_HASHES.get(self.name, "missing")
+            if (
+                dataset_module.builder_configs_parameters.metadata_configs
+                and self.config.name in dataset_module.builder_configs_parameters.metadata_configs
+            ):
+                hash = update_hash_with_config_parameters(
+                    hash, dataset_module.builder_configs_parameters.metadata_configs[self.config.name]
+                )
+            legacy_relative_data_dir = posixpath.join(
+                self.dataset_name if namespace is None else f"{namespace}___{self.dataset_name}",
+                config_id,
+                "0.0.0",
+                hash,
+            )
+            legacy_cache_dir = posixpath.join(self._cache_dir_root, legacy_relative_data_dir)
+            if os.path.isdir(legacy_cache_dir):
+                return legacy_relative_data_dir
+
     @classmethod
     def get_all_exported_dataset_infos(cls) -> DatasetInfosDict:
         """Empty dict if doesn't exist
@@ -446,9 +510,9 @@ class DatasetBuilder:
 
         ```py
         >>> from datasets import load_dataset_builder
-        >>> ds_builder = load_dataset_builder('rotten_tomatoes')
+        >>> ds_builder = load_dataset_builder('vivos')
         >>> ds_builder.get_all_exported_dataset_infos()
-        {'default': DatasetInfo(description="Movie Review Dataset.\nThis is a dataset of containing 5,331 positive and 5,331 negative processed\nsentences from Rotten Tomatoes movie reviews. This data was first used in Bo\nPang and Lillian Lee, ``Seeing stars: Exploiting class relationships for\nsentiment categorization with respect to rating scales.'', Proceedings of the\nACL, 2005.\n", citation='@InProceedings{Pang+Lee:05a,\n  author =       {Bo Pang and Lillian Lee},\n  title =        {Seeing stars: Exploiting class relationships for sentiment\n                  categorization with respect to rating scales},\n  booktitle =    {Proceedings of the ACL},\n  year =         2005\n}\n', homepage='http://www.cs.cornell.edu/people/pabo/movie-review-data/', license='', features={'text': Value(dtype='string', id=None), 'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None)}, post_processed=None, supervised_keys=SupervisedKeysData(input='', output=''), task_templates=[TextClassification(task='text-classification', text_column='text', label_column='label')], builder_name='rotten_tomatoes_movie_review', config_name='default', version=1.0.0, splits={'train': SplitInfo(name='train', num_bytes=1074810, num_examples=8530, dataset_name='rotten_tomatoes_movie_review'), 'validation': SplitInfo(name='validation', num_bytes=134679, num_examples=1066, dataset_name='rotten_tomatoes_movie_review'), 'test': SplitInfo(name='test', num_bytes=135972, num_examples=1066, dataset_name='rotten_tomatoes_movie_review')}, download_checksums={'https://storage.googleapis.com/seldon-datasets/sentence_polarity_v1/rt-polaritydata.tar.gz': {'num_bytes': 487770, 'checksum': 'a05befe52aafda71d458d188a1c54506a998b1308613ba76bbda2e5029409ce9'}}, download_size=487770, post_processing_size=None, dataset_size=1345461, size_in_bytes=1833231)}
+        {'default': DatasetInfo(description='', citation='', homepage='', license='', features={'speaker_id': Value(dtype='string', id=None), 'path': Value(dtype='string', id=None), 'audio': Audio(sampling_rate=16000, mono=True, decode=True, id=None), 'sentence': Value(dtype='string', id=None)}, post_processed=None, supervised_keys=None, builder_name=None, dataset_name=None, config_name='default', version=None, splits={'train': SplitInfo(name='train', num_bytes=1722002133, num_examples=11660, shard_lengths=None, dataset_name=None), 'test': SplitInfo(name='test', num_bytes=86120227, num_examples=760, shard_lengths=None, dataset_name=None)}, download_checksums=None, download_size=1475540500, post_processing_size=None, dataset_size=1808122360, size_in_bytes=None)}
         ```
         """
         return DatasetInfosDict.from_directory(cls.get_imported_module_dir())
@@ -462,7 +526,7 @@ class DatasetBuilder:
         >>> from datasets import load_dataset_builder
         >>> ds_builder = load_dataset_builder('rotten_tomatoes')
         >>> ds_builder.get_exported_dataset_info()
-        DatasetInfo(description="Movie Review Dataset.\nThis is a dataset of containing 5,331 positive and 5,331 negative processed\nsentences from Rotten Tomatoes movie reviews. This data was first used in Bo\nPang and Lillian Lee, ``Seeing stars: Exploiting class relationships for\nsentiment categorization with respect to rating scales.'', Proceedings of the\nACL, 2005.\n", citation='@InProceedings{Pang+Lee:05a,\n  author =       {Bo Pang and Lillian Lee},\n  title =        {Seeing stars: Exploiting class relationships for sentiment\n                  categorization with respect to rating scales},\n  booktitle =    {Proceedings of the ACL},\n  year =         2005\n}\n', homepage='http://www.cs.cornell.edu/people/pabo/movie-review-data/', license='', features={'text': Value(dtype='string', id=None), 'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None)}, post_processed=None, supervised_keys=SupervisedKeysData(input='', output=''), task_templates=[TextClassification(task='text-classification', text_column='text', label_column='label')], builder_name='rotten_tomatoes_movie_review', config_name='default', version=1.0.0, splits={'train': SplitInfo(name='train', num_bytes=1074810, num_examples=8530, dataset_name='rotten_tomatoes_movie_review'), 'validation': SplitInfo(name='validation', num_bytes=134679, num_examples=1066, dataset_name='rotten_tomatoes_movie_review'), 'test': SplitInfo(name='test', num_bytes=135972, num_examples=1066, dataset_name='rotten_tomatoes_movie_review')}, download_checksums={'https://storage.googleapis.com/seldon-datasets/sentence_polarity_v1/rt-polaritydata.tar.gz': {'num_bytes': 487770, 'checksum': 'a05befe52aafda71d458d188a1c54506a998b1308613ba76bbda2e5029409ce9'}}, download_size=487770, post_processing_size=None, dataset_size=1345461, size_in_bytes=1833231)
+        DatasetInfo(description='', citation='', homepage='', license='', features={'speaker_id': Value(dtype='string', id=None), 'path': Value(dtype='string', id=None), 'audio': Audio(sampling_rate=16000, mono=True, decode=True, id=None), 'sentence': Value(dtype='string', id=None)}, post_processed=None, supervised_keys=None, builder_name=None, dataset_name=None, config_name='default', version=None, splits={'train': SplitInfo(name='train', num_bytes=1722002133, num_examples=11660, shard_lengths=None, dataset_name=None), 'test': SplitInfo(name='test', num_bytes=86120227, num_examples=760, shard_lengths=None, dataset_name=None)}, download_checksums=None, download_size=1475540500, post_processing_size=None, dataset_size=1808122360, size_in_bytes=None)
         ```
         """
         return self.get_all_exported_dataset_infos().get(self.config.name, DatasetInfo())
@@ -477,27 +541,33 @@ class DatasetBuilder:
         builder_config = None
 
         # try default config
-        if config_name is None and self.BUILDER_CONFIGS and not config_kwargs:
+        if config_name is None and self.BUILDER_CONFIGS:
             if self.DEFAULT_CONFIG_NAME is not None:
                 builder_config = self.builder_configs.get(self.DEFAULT_CONFIG_NAME)
-                logger.warning(f"No config specified, defaulting to: {self.name}/{builder_config.name}")
+                logger.info(f"No config specified, defaulting to: {self.dataset_name}/{builder_config.name}")
             else:
                 if len(self.BUILDER_CONFIGS) > 1:
-                    example_of_usage = f"load_dataset('{self.name}', '{self.BUILDER_CONFIGS[0].name}')"
-                    raise ValueError(
-                        "Config name is missing."
-                        f"\nPlease pick one among the available configs: {list(self.builder_configs.keys())}"
-                        + f"\nExample of usage:\n\t`{example_of_usage}`"
+                    if not config_kwargs:
+                        example_of_usage = (
+                            f"load_dataset('{self.repo_id or self.dataset_name}', '{self.BUILDER_CONFIGS[0].name}')"
+                        )
+                        raise ValueError(
+                            "Config name is missing."
+                            f"\nPlease pick one among the available configs: {list(self.builder_configs.keys())}"
+                            + f"\nExample of usage:\n\t`{example_of_usage}`"
+                        )
+                else:
+                    builder_config = self.BUILDER_CONFIGS[0]
+                    logger.info(
+                        f"No config specified, defaulting to the single config: {self.dataset_name}/{builder_config.name}"
                     )
-                builder_config = self.BUILDER_CONFIGS[0]
-                logger.info(f"No config specified, defaulting to the single config: {self.name}/{builder_config.name}")
 
         # try to get config by name
         if isinstance(config_name, str):
             builder_config = self.builder_configs.get(config_name)
             if builder_config is None and self.BUILDER_CONFIGS:
                 raise ValueError(
-                    f"BuilderConfig {config_name} not found. Available: {list(self.builder_configs.keys())}"
+                    f"BuilderConfig '{config_name}' not found. Available: {list(self.builder_configs.keys())}"
                 )
 
         # if not using an existing config, then create a new config on the fly
@@ -513,7 +583,7 @@ class DatasetBuilder:
 
         # otherwise use the config_kwargs to overwrite the attributes
         else:
-            builder_config = copy.deepcopy(builder_config)
+            builder_config = copy.deepcopy(builder_config) if config_kwargs else builder_config
             for key, value in config_kwargs.items():
                 if value is not None:
                     if not hasattr(builder_config, key):
@@ -522,6 +592,12 @@ class DatasetBuilder:
 
         if not builder_config.name:
             raise ValueError(f"BuilderConfig must have a name, got {builder_config.name}")
+
+        # resolve data files if needed
+        builder_config._resolve_data_files(
+            base_path=self.base_path,
+            download_config=DownloadConfig(token=self.token, storage_options=self.storage_options),
+        )
 
         # compute the config id that is going to be used for caching
         config_id = builder_config.create_config_id(
@@ -542,16 +618,14 @@ class DatasetBuilder:
                 )
             if not builder_config.version:
                 raise ValueError(f"BuilderConfig {builder_config.name} must have a version")
-            # if not builder_config.description:
-            #     raise ValueError(f"BuilderConfig {builder_config.name} must have a description"  )
 
         return builder_config, config_id
 
     @classproperty
     @classmethod
     @memoize()
-    def builder_configs(cls):
-        """Pre-defined list of configurations for this builder class."""
+    def builder_configs(cls) -> Dict[str, BuilderConfig]:
+        """Dictionary of pre-defined configurations for this builder class."""
         configs = {config.name: config for config in cls.BUILDER_CONFIGS}
         if len(configs) != len(cls.BUILDER_CONFIGS):
             names = [config.name for config in cls.BUILDER_CONFIGS]
@@ -562,38 +636,38 @@ class DatasetBuilder:
     def cache_dir(self):
         return self._cache_dir
 
-    def _relative_data_dir(self, with_version=True, with_hash=True, is_local=True) -> str:
+    def _use_legacy_cache_dir_if_possible(self, dataset_module: "DatasetModule"):
+        # Check for the legacy cache directory template (datasets<3.0.0)
+        self._legacy_relative_data_dir = (
+            self._check_legacy_cache2(dataset_module) or self._check_legacy_cache() or None
+        )
+        self._cache_dir = self._build_cache_dir()
+        self._output_dir = self._cache_dir
+
+    def _relative_data_dir(self, with_version=True, with_hash=True) -> str:
         """Relative path of this dataset in cache_dir:
         Will be:
-            self.name/self.config.version/self.hash/
+            self.dataset_name/self.config.version/self.hash/
         or if a repo_id with a namespace has been specified:
-            self.namespace___self.name/self.config.version/self.hash/
+            self.namespace___self.dataset_name/self.config.version/self.hash/
         If any of these element is missing or if ``with_version=False`` the corresponding subfolders are dropped.
         """
+        if self._legacy_relative_data_dir is not None and with_version and with_hash:
+            return self._legacy_relative_data_dir
+
         namespace = self.repo_id.split("/")[0] if self.repo_id and self.repo_id.count("/") > 0 else None
-        builder_data_dir = self.name if namespace is None else f"{namespace}___{self.name}"
-        builder_config = self.config
-        hash = self.hash
-        path_join = os.path.join if is_local else posixpath.join
-        if builder_config:
-            # use the enriched name instead of the name to make it unique
-            builder_data_dir = path_join(builder_data_dir, self.config_id)
+        builder_data_dir = self.dataset_name if namespace is None else f"{namespace}___{self.dataset_name}"
+        builder_data_dir = posixpath.join(builder_data_dir, self.config_id)
         if with_version:
-            builder_data_dir = path_join(builder_data_dir, str(self.config.version))
-        if with_hash and hash and isinstance(hash, str):
-            builder_data_dir = path_join(builder_data_dir, hash)
+            builder_data_dir = posixpath.join(builder_data_dir, str(self.config.version))
+        if with_hash and self.hash and isinstance(self.hash, str):
+            builder_data_dir = posixpath.join(builder_data_dir, self.hash)
         return builder_data_dir
 
     def _build_cache_dir(self):
         """Return the data directory for the current version."""
-        is_local = not is_remote_url(self._cache_dir_root)
-        path_join = os.path.join if is_local else posixpath.join
-        builder_data_dir = path_join(
-            self._cache_dir_root, self._relative_data_dir(with_version=False, is_local=is_local)
-        )
-        version_data_dir = path_join(
-            self._cache_dir_root, self._relative_data_dir(with_version=True, is_local=is_local)
-        )
+        builder_data_dir = posixpath.join(self._cache_dir_root, self._relative_data_dir(with_version=False))
+        version_data_dir = posixpath.join(self._cache_dir_root, self._relative_data_dir(with_version=True))
 
         def _other_versions_on_disk():
             """Returns previous versions on disk."""
@@ -616,7 +690,7 @@ class DatasetBuilder:
                 other_version = version_dirs[0][0]
                 if other_version != self.config.version:
                     warn_msg = (
-                        f"Found a different version {str(other_version)} of dataset {self.name} in "
+                        f"Found a different version {str(other_version)} of dataset {self.dataset_name} in "
                         f"cache_dir {self._cache_dir_root}. Using currently defined version "
                         f"{str(self.config.version)}."
                     )
@@ -650,11 +724,8 @@ class DatasetBuilder:
         download_config: Optional[DownloadConfig] = None,
         download_mode: Optional[Union[DownloadMode, str]] = None,
         verification_mode: Optional[Union[VerificationMode, str]] = None,
-        ignore_verifications="deprecated",
-        try_from_hf_gcs: bool = True,
         dl_manager: Optional[DownloadManager] = None,
         base_path: Optional[str] = None,
-        use_auth_token="deprecated",
         file_format: str = "arrow",
         max_shard_size: Optional[Union[int, str]] = None,
         num_proc: Optional[int] = None,
@@ -677,31 +748,11 @@ class DatasetBuilder:
                 Verification mode determining the checks to run on the downloaded/processed dataset information (checksums/size/splits/...).
 
                 <Added version="2.9.1"/>
-            ignore_verifications (`bool`, defaults to `False`):
-                Ignore the verifications of the downloaded/processed dataset information (checksums/size/splits/...).
-
-                <Deprecated version="2.9.1">
-
-                `ignore_verifications` was deprecated in version 2.9.1 and will be removed in 3.0.0.
-                Please use `verification_mode` instead.
-
-                </Deprecated>
-            try_from_hf_gcs (`bool`):
-                If `True`, it will try to download the already prepared dataset from the HF Google cloud storage.
             dl_manager (`DownloadManager`, *optional*):
                 Specific `DownloadManger` to use.
             base_path (`str`, *optional*):
                 Base path for relative paths that are used to download files. This can be a remote url.
                 If not specified, the value of the `base_path` attribute (`self.base_path`) will be used instead.
-            use_auth_token (`Union[str, bool]`, *optional*):
-                Optional string or boolean to use as Bearer token for remote files on the Datasets Hub.
-                If True, or not specified, will get token from ~/.huggingface.
-
-                <Deprecated version="2.7.1">
-
-                Pass `use_auth_token` to the initializer/`load_dataset_builder` instead.
-
-                </Deprecated>
             file_format (`str`, *optional*):
                 Format of the data files in which the dataset will be written.
                 Supported formats: "arrow", "parquet". Default to "arrow" format.
@@ -752,27 +803,11 @@ class DatasetBuilder:
         >>> builder.download_and_prepare("s3://my-bucket/my_rotten_tomatoes", storage_options=storage_options, file_format="parquet")
         ```
         """
-        if ignore_verifications != "deprecated":
-            verification_mode = VerificationMode.NO_CHECKS if ignore_verifications else VerificationMode.ALL_CHECKS
-            warnings.warn(
-                "'ignore_verifications' was deprecated in favor of 'verification_mode' in version 2.9.1 and will be removed in 3.0.0.\n"
-                f"You can remove this warning by passing 'verification_mode={verification_mode.value}' instead.",
-                FutureWarning,
-            )
-        if use_auth_token != "deprecated":
-            warnings.warn(
-                "'use_auth_token' was deprecated in version 2.7.1 and will be removed in 3.0.0. Pass `use_auth_token` to the initializer/`load_dataset_builder` instead.",
-                FutureWarning,
-            )
-        else:
-            use_auth_token = self.use_auth_token
-
         output_dir = output_dir if output_dir is not None else self._cache_dir
-        # output_dir can be a remote bucket on GCS or S3 (when using BeamBasedBuilder for distributed data processing)
-        fs_token_paths = fsspec.get_fs_token_paths(output_dir, storage_options=storage_options)
-        self._fs: fsspec.AbstractFileSystem = fs_token_paths[0]
-        is_local = not is_remote_filesystem(self._fs)
-        self._output_dir = fs_token_paths[2][0] if is_local else self._fs.unstrip_protocol(fs_token_paths[2][0])
+        # output_dir can be a remote bucket on GCS or S3
+        fs, output_dir = url_to_fs(output_dir, **(storage_options or {}))
+        self._fs = fs
+        self._output_dir = output_dir if not is_remote_filesystem(self._fs) else self._fs.unstrip_protocol(output_dir)
 
         download_mode = DownloadMode(download_mode or DownloadMode.REUSE_DATASET_IF_EXISTS)
         verification_mode = VerificationMode(verification_mode or VerificationMode.BASIC_CHECKS)
@@ -788,7 +823,7 @@ class DatasetBuilder:
             # when the dataset is being written
             raise RuntimeError(
                 f"Unable to download and prepare the dataset at the root {self._output_dir}. "
-                f"Please specify a subdirectory, e.g. '{self._output_dir + self.name}'"
+                f"Please specify a subdirectory, e.g. '{self._output_dir + self.dataset_name}'"
             )
 
         if dl_manager is None:
@@ -799,25 +834,19 @@ class DatasetBuilder:
                     force_extract=download_mode == DownloadMode.FORCE_REDOWNLOAD,
                     use_etag=False,
                     num_proc=num_proc,
-                    use_auth_token=use_auth_token,
+                    token=self.token,
                     storage_options=self.storage_options,
                 )  # We don't use etag for data files to speed up the process
 
             dl_manager = DownloadManager(
-                dataset_name=self.name,
+                dataset_name=self.dataset_name,
                 download_config=download_config,
                 data_dir=self.config.data_dir,
                 base_path=base_path,
                 record_checksums=(self._record_infos or verification_mode == VerificationMode.ALL_CHECKS),
             )
 
-        if (
-            isinstance(dl_manager, MockDownloadManager)
-            or not is_local
-            or file_format != "arrow"
-            or max_shard_size is not None
-        ):
-            try_from_hf_gcs = False
+        is_local = not is_remote_filesystem(self._fs)
         self.dl_manager = dl_manager
 
         # Prevent parallel local disk operations
@@ -829,17 +858,16 @@ class DatasetBuilder:
         # File locking only with local paths; no file locking on GCS or S3
         with FileLock(lock_path) if is_local else contextlib.nullcontext():
             # Check if the data already exists
-            path_join = os.path.join if is_local else posixpath.join
-            data_exists = self._fs.exists(path_join(self._output_dir, config.DATASET_INFO_FILENAME))
+            data_exists = self._fs.exists(posixpath.join(self._output_dir, config.DATASET_INFO_FILENAME))
             if data_exists and download_mode == DownloadMode.REUSE_DATASET_IF_EXISTS:
-                logger.warning(f"Found cached dataset {self.name} ({self._output_dir})")
+                logger.info(f"Found cached dataset {self.dataset_name} ({self._output_dir})")
                 # We need to update the info in case some splits were added in the meantime
                 # for example when calling load_dataset from multiple workers.
                 self.info = self._load_info()
                 self.download_post_processing_resources(dl_manager)
                 return
 
-            logger.info(f"Generating dataset {self.name} ({self._output_dir})")
+            logger.info(f"Generating dataset {self.dataset_name} ({self._output_dir})")
             if is_local:  # if cache dir is local, check for available space
                 if not has_sufficient_disk_space(
                     self.info.size_in_bytes or 0, directory=Path(self._output_dir).parent
@@ -871,17 +899,15 @@ class DatasetBuilder:
             # information needed to cancel download/preparation if needed.
             # This comes right before the progress bar.
             if self.info.size_in_bytes:
-                print(
-                    f"Downloading and preparing dataset {self.info.builder_name}/{self.info.config_name} "
+                logger.info(
+                    f"Downloading and preparing dataset {self.dataset_name}/{self.config.name} "
                     f"(download: {size_str(self.info.download_size)}, generated: {size_str(self.info.dataset_size)}, "
                     f"post-processed: {size_str(self.info.post_processing_size)}, "
                     f"total: {size_str(self.info.size_in_bytes)}) to {self._output_dir}..."
                 )
             else:
                 _dest = self._fs._strip_protocol(self._output_dir) if is_local else self._output_dir
-                print(
-                    f"Downloading and preparing dataset {self.info.builder_name}/{self.info.config_name} to {_dest}..."
-                )
+                logger.info(f"Downloading and preparing dataset {self.dataset_name}/{self.config.name} to {_dest}...")
 
             self._check_manual_download(dl_manager)
 
@@ -890,40 +916,30 @@ class DatasetBuilder:
                 # Temporarily assign _output_dir to tmp_data_dir to avoid having to forward
                 # it to every sub function.
                 with temporary_assignment(self, "_output_dir", tmp_output_dir):
-                    # Try to download the already prepared dataset files
-                    downloaded_from_gcs = False
-                    if try_from_hf_gcs:
-                        try:
-                            self._download_prepared_from_hf_gcs(dl_manager.download_config)
-                            downloaded_from_gcs = True
-                        except (DatasetNotOnHfGcsError, MissingFilesOnHfGcsError):
-                            logger.info("Dataset not on Hf google storage. Downloading and preparing it from source")
-                        except ConnectionError:
-                            logger.warning("HF google storage unreachable. Downloading and preparing it from source")
-                    if not downloaded_from_gcs:
-                        prepare_split_kwargs = {"file_format": file_format}
-                        if max_shard_size is not None:
-                            prepare_split_kwargs["max_shard_size"] = max_shard_size
-                        if num_proc is not None:
-                            prepare_split_kwargs["num_proc"] = num_proc
-                        self._download_and_prepare(
-                            dl_manager=dl_manager,
-                            verification_mode=verification_mode,
-                            **prepare_split_kwargs,
-                            **download_and_prepare_kwargs,
-                        )
+                    prepare_split_kwargs = {"file_format": file_format}
+                    if max_shard_size is not None:
+                        prepare_split_kwargs["max_shard_size"] = max_shard_size
+                    if num_proc is not None:
+                        prepare_split_kwargs["num_proc"] = num_proc
+                    self._download_and_prepare(
+                        dl_manager=dl_manager,
+                        verification_mode=verification_mode,
+                        **prepare_split_kwargs,
+                        **download_and_prepare_kwargs,
+                    )
                     # Sync info
                     self.info.dataset_size = sum(split.num_bytes for split in self.info.splits.values())
                     self.info.download_checksums = dl_manager.get_recorded_sizes_checksums()
-                    self.info.size_in_bytes = self.info.dataset_size + self.info.download_size
+                    if self.info.download_size is not None:
+                        self.info.size_in_bytes = self.info.dataset_size + self.info.download_size
                     # Save info
                     self._save_info()
 
             # Download post processing resources
             self.download_post_processing_resources(dl_manager)
 
-            print(
-                f"Dataset {self.name} downloaded and prepared to {self._output_dir}. "
+            logger.info(
+                f"Dataset {self.dataset_name} downloaded and prepared to {self._output_dir}. "
                 f"Subsequent calls will reuse this data."
             )
 
@@ -932,33 +948,13 @@ class DatasetBuilder:
             raise ManualDownloadError(
                 textwrap.dedent(
                     f"""\
-                    The dataset {self.name} with config {self.config.name} requires manual data.
+                    The dataset {self.dataset_name} with config {self.config.name} requires manual data.
                     Please follow the manual download instructions:
                      {self.manual_download_instructions}
                     Manual data can be loaded with:
-                     datasets.load_dataset("{self.name}", data_dir="<path/to/manual/data>")"""
+                     datasets.load_dataset("{self.repo_id or self.dataset_name}", data_dir="<path/to/manual/data>")"""
                 )
             )
-
-    def _download_prepared_from_hf_gcs(self, download_config: DownloadConfig):
-        relative_data_dir = self._relative_data_dir(with_version=True, with_hash=False)
-        reader = ArrowReader(self._output_dir, self.info)
-        # use reader instructions to download the right files
-        reader.download_from_hf_gcs(download_config, relative_data_dir)
-        downloaded_info = DatasetInfo.from_directory(self._output_dir)
-        self.info.update(downloaded_info)
-        # download post processing resources
-        remote_cache_dir = HF_GCP_BASE_URL + "/" + relative_data_dir.replace(os.sep, "/")
-        for split in self.info.splits:
-            for resource_file_name in self._post_processing_resources(split).values():
-                if os.sep in resource_file_name:
-                    raise ValueError(f"Resources shouldn't be in a sub-directory: {resource_file_name}")
-                try:
-                    resource_path = cached_path(remote_cache_dir + "/" + resource_file_name)
-                    shutil.move(resource_path, os.path.join(self._output_dir, resource_file_name))
-                except ConnectionError:
-                    logger.info(f"Couldn't download resourse file {resource_file_name} from Hf google storage.")
-        logger.info("Dataset downloaded from Hf google storage.")
 
     def _download_and_prepare(self, dl_manager, verification_mode, **prepare_split_kwargs):
         """Downloads and prepares dataset for reading.
@@ -977,7 +973,7 @@ class DatasetBuilder:
             prepare_split_kwargs: Additional options, such as `file_format`, `max_shard_size`
         """
         # Generating data for all splits
-        split_dict = SplitDict(dataset_name=self.name)
+        split_dict = SplitDict(dataset_name=self.dataset_name)
         split_generators_kwargs = self._make_split_generators_kwargs(prepare_split_kwargs)
         split_generators = self._split_generators(dl_manager, **split_generators_kwargs)
 
@@ -1045,17 +1041,21 @@ class DatasetBuilder:
         return DatasetInfo.from_directory(self._output_dir, storage_options=self._fs.storage_options)
 
     def _save_info(self):
-        is_local = not is_remote_filesystem(self._fs)
-        if is_local:
-            lock_path = self._output_dir + "_info.lock"
-        with FileLock(lock_path) if is_local else contextlib.nullcontext():
+        file_lock = (
+            FileLock(self._output_dir + "_info.lock")
+            if not is_remote_filesystem(self._fs)
+            else contextlib.nullcontext()
+        )
+        with file_lock:
             self.info.write_to_directory(self._output_dir, storage_options=self._fs.storage_options)
 
     def _save_infos(self):
-        is_local = not is_remote_filesystem(self._fs)
-        if is_local:
-            lock_path = self._output_dir + "_infos.lock"
-        with FileLock(lock_path) if is_local else contextlib.nullcontext():
+        file_lock = (
+            FileLock(self._output_dir + "_infos.lock")
+            if not is_remote_filesystem(self._fs)
+            else contextlib.nullcontext()
+        )
+        with file_lock:
             DatasetInfosDict(**{self.config.name: self.info}).write_to_directory(self.get_imported_module_dir())
 
     def _make_split_generators_kwargs(self, prepare_split_kwargs):
@@ -1068,7 +1068,6 @@ class DatasetBuilder:
         split: Optional[Split] = None,
         run_post_process=True,
         verification_mode: Optional[Union[VerificationMode, str]] = None,
-        ignore_verifications="deprecated",
         in_memory=False,
     ) -> Union[Dataset, DatasetDict]:
         """Return a Dataset for the specified split.
@@ -1084,16 +1083,6 @@ class DatasetBuilder:
                 downloaded/processed dataset information (checksums/size/splits/...).
 
                 <Added version="2.9.1"/>
-            ignore_verifications (`bool`, defaults to `False`):
-                Whether to ignore the verifications of the
-                downloaded/processed dataset information (checksums/size/splits/...).
-
-                <Deprecated version="2.9.1">
-
-                `ignore_verifications` was deprecated in version 2.9.1 and will be removed in 3.0.0.
-                Please use `verification_mode` instead.
-
-                </Deprecated>
             in_memory (`bool`, defaults to `False`):
                 Whether to copy the data in-memory.
 
@@ -1114,26 +1103,18 @@ class DatasetBuilder:
         })
         ```
         """
-        if ignore_verifications != "deprecated":
-            verification_mode = verification_mode.NO_CHECKS if ignore_verifications else VerificationMode.ALL_CHECKS
-            warnings.warn(
-                "'ignore_verifications' was deprecated in favor of 'verification' in version 2.9.1 and will be removed in 3.0.0.\n"
-                f"You can remove this warning by passing 'verification_mode={verification_mode.value}' instead.",
-                FutureWarning,
-            )
         if self._file_format is not None and self._file_format != "arrow":
             raise FileFormatError('Loading a dataset not written in the "arrow" format is not supported.')
-        is_local = not is_remote_filesystem(self._fs)
-        if not is_local:
+        if is_remote_filesystem(self._fs):
             raise NotImplementedError(f"Loading a dataset cached in a {type(self._fs).__name__} is not supported.")
         if not os.path.exists(self._output_dir):
             raise FileNotFoundError(
-                f"Dataset {self.name}: could not find data in {self._output_dir}. Please make sure to call "
+                f"Dataset {self.dataset_name}: could not find data in {self._output_dir}. Please make sure to call "
                 "builder.download_and_prepare(), or use "
                 "datasets.load_dataset() before trying to access the Dataset object."
             )
 
-        logger.debug(f'Constructing Dataset for split {split or ", ".join(self.info.splits)}, from {self._output_dir}')
+        logger.debug(f"Constructing Dataset for split {split or ', '.join(self.info.splits)}, from {self._output_dir}")
 
         # By default, return all splits
         if split is None:
@@ -1151,7 +1132,7 @@ class DatasetBuilder:
             ),
             split,
             map_tuple=True,
-            disable_tqdm=not logging.is_progress_bar_enabled(),
+            disable_tqdm=True,
         )
         if isinstance(datasets, dict):
             datasets = DatasetDict(datasets)
@@ -1243,8 +1224,11 @@ class DatasetBuilder:
             `Dataset`
         """
         cache_dir = self._fs._strip_protocol(self._output_dir)
+        dataset_name = self.dataset_name
+        if self._check_legacy_cache():
+            dataset_name = self.name
         dataset_kwargs = ArrowReader(cache_dir, self.info).read(
-            name=self.name,
+            name=dataset_name,
             instructions=split,
             split_infos=self.info.splits.values(),
             in_memory=in_memory,
@@ -1255,7 +1239,7 @@ class DatasetBuilder:
     def _get_dataset_fingerprint(self, split: Union[ReadInstruction, Split]) -> str:
         """The dataset fingerprint is the hash of the relative directory dataset_name/config_name/version/hash, as well as the split specs."""
         hasher = Hasher()
-        hasher.update(self._relative_data_dir().replace(os.sep, "/"))
+        hasher.update(Path(self._relative_data_dir()).as_posix())
         hasher.update(str(split))  # for example: train, train+test, train[:10%], test[:33%](pct1_dropremainder)
         fingerprint = hasher.hexdigest()
         return fingerprint
@@ -1265,16 +1249,15 @@ class DatasetBuilder:
         split: Optional[str] = None,
         base_path: Optional[str] = None,
     ) -> Union[Dict[str, IterableDataset], IterableDataset]:
-        is_local = not is_remote_filesystem(self._fs)
-        if not is_local:
+        if is_remote_filesystem(self._fs):
             raise NotImplementedError(
                 f"Loading a streaming dataset cached in a {type(self._fs).__name__} is not supported yet."
             )
 
         dl_manager = StreamingDownloadManager(
             base_path=base_path or self.base_path,
-            download_config=DownloadConfig(use_auth_token=self.use_auth_token, storage_options=self.storage_options),
-            dataset_name=self.name,
+            download_config=DownloadConfig(token=self.token, storage_options=self.storage_options),
+            dataset_name=self.dataset_name,
             data_dir=self.config.data_dir,
         )
         self._check_manual_download(dl_manager)
@@ -1303,7 +1286,7 @@ class DatasetBuilder:
     ) -> IterableDataset:
         ex_iterable = self._get_examples_iterable_for_split(splits_generator)
         # add auth to be able to access and decode audio/image files from private repositories.
-        token_per_repo_id = {self.repo_id: self.use_auth_token} if self.repo_id else {}
+        token_per_repo_id = {self.repo_id: self.token} if self.repo_id else {}
         return IterableDataset(
             ex_iterable, info=self.info, split=splits_generator.name, token_per_repo_id=token_per_repo_id
         )
@@ -1323,7 +1306,7 @@ class DatasetBuilder:
         return None
 
     @abc.abstractmethod
-    def _split_generators(self, dl_manager: DownloadManager):
+    def _split_generators(self, dl_manager: Union[DownloadManager, StreamingDownloadManager]):
         """Specify feature dictionary generators and dataset splits.
 
         This function returns a list of `SplitGenerator`s defining how to generate
@@ -1361,7 +1344,7 @@ class DatasetBuilder:
         distribute the relevant parts to each split with the `gen_kwargs` argument
 
         Args:
-            dl_manager (`DownloadManager`):
+            dl_manager (`Union[DownloadManager, StreamingDownloadManager]`):
                 Download manager to download the data
 
         Returns:
@@ -1395,8 +1378,7 @@ class DatasetBuilder:
                 Multiprocessing is disabled by default.
 
                 <Added version="2.7.0"/>
-            **kwargs: Additional kwargs forwarded from _download_and_prepare (ex:
-                beam pipeline)
+            **kwargs: Additional kwargs forwarded from _download_and_prepare
         """
         raise NotImplementedError()
 
@@ -1459,8 +1441,6 @@ class GeneratorBasedBuilder(DatasetBuilder):
         max_shard_size: Optional[Union[int, str]] = None,
     ):
         max_shard_size = convert_file_size_to_int(max_shard_size or config.MAX_SHARD_SIZE)
-        is_local = not is_remote_filesystem(self._fs)
-        path_join = os.path.join if is_local else posixpath.join
 
         if self.info.splits is not None:
             split_info = self.info.splits[split_generator.name]
@@ -1468,27 +1448,25 @@ class GeneratorBasedBuilder(DatasetBuilder):
             split_info = split_generator.split_info
 
         SUFFIX = "-JJJJJ-SSSSS-of-NNNNN"
-        fname = f"{self.name}-{split_generator.name}{SUFFIX}.{file_format}"
-        fpath = path_join(self._output_dir, fname)
+        fname = f"{self.dataset_name}-{split_generator.name}{SUFFIX}.{file_format}"
+        fpath = posixpath.join(self._output_dir, fname)
 
         if num_proc and num_proc > 1:
             num_input_shards = _number_of_shards_in_gen_kwargs(split_generator.gen_kwargs)
-            if num_input_shards <= 1 and num_proc is not None:
+            if num_input_shards <= 1:
                 logger.warning(
                     f"Setting num_proc from {num_proc} back to 1 for the {split_info.name} split to disable multiprocessing as it only contains one shard."
                 )
                 num_proc = 1
-            elif num_proc is not None and num_input_shards < num_proc:
-                logger.info(
+            elif num_input_shards < num_proc:
+                logger.warning(
                     f"Setting num_proc from {num_proc} to {num_input_shards} for the {split_info.name} split as it only contains {num_input_shards} shards."
                 )
                 num_proc = num_input_shards
 
-        pbar = logging.tqdm(
-            disable=not logging.is_progress_bar_enabled(),
+        pbar = hf_tqdm(
             unit=" examples",
             total=split_info.num_examples,
-            leave=False,
             desc=f"Generating {split_info.name} split",
         )
 
@@ -1550,9 +1528,9 @@ class GeneratorBasedBuilder(DatasetBuilder):
                             # the content is the number of examples progress update
                             pbar.update(content)
 
-            assert (
-                None not in examples_per_job
-            ), f"Failed to retrieve results from prepare_split: result list {examples_per_job} still contains None - at least one worker failed to return its results"
+            assert None not in examples_per_job, (
+                f"Failed to retrieve results from prepare_split: result list {examples_per_job} still contains None - at least one worker failed to return its results"
+            )
 
         total_shards = sum(shards_per_job)
         total_num_examples = sum(examples_per_job)
@@ -1720,8 +1698,6 @@ class ArrowBasedBuilder(DatasetBuilder):
         max_shard_size: Optional[Union[str, int]] = None,
     ):
         max_shard_size = convert_file_size_to_int(max_shard_size or config.MAX_SHARD_SIZE)
-        is_local = not is_remote_filesystem(self._fs)
-        path_join = os.path.join if is_local else posixpath.join
 
         try:
             split_info = self.info.splits[split_generator.name]
@@ -1729,27 +1705,25 @@ class ArrowBasedBuilder(DatasetBuilder):
             split_info = split_generator.split_info
 
         SUFFIX = "-JJJJJ-SSSSS-of-NNNNN"
-        fname = f"{self.name}-{split_generator.name}{SUFFIX}.{file_format}"
-        fpath = path_join(self._output_dir, fname)
+        fname = f"{self.dataset_name}-{split_generator.name}{SUFFIX}.{file_format}"
+        fpath = posixpath.join(self._output_dir, fname)
 
         if num_proc and num_proc > 1:
             num_input_shards = _number_of_shards_in_gen_kwargs(split_generator.gen_kwargs)
-            if num_input_shards <= 1 and num_proc is not None:
+            if num_input_shards <= 1:
                 logger.warning(
                     f"Setting num_proc from {num_proc} back to 1 for the {split_info.name} split to disable multiprocessing as it only contains one shard."
                 )
                 num_proc = 1
-            elif num_proc is not None and num_input_shards < num_proc:
-                logger.info(
+            elif num_input_shards < num_proc:
+                logger.warning(
                     f"Setting num_proc from {num_proc} to {num_input_shards} for the {split_info.name} split as it only contains {num_input_shards} shards."
                 )
                 num_proc = num_input_shards
 
-        pbar = logging.tqdm(
-            disable=not logging.is_progress_bar_enabled(),
+        pbar = hf_tqdm(
             unit=" examples",
             total=split_info.num_examples,
-            leave=False,
             desc=f"Generating {split_info.name} split",
         )
 
@@ -1809,9 +1783,9 @@ class ArrowBasedBuilder(DatasetBuilder):
                             # the content is the number of examples progress update
                             pbar.update(content)
 
-            assert (
-                None not in examples_per_job
-            ), f"Failed to retrieve results from prepare_split: result list {examples_per_job} still contains None - at least one worker failed to return its results"
+            assert None not in examples_per_job, (
+                f"Failed to retrieve results from prepare_split: result list {examples_per_job} still contains None - at least one worker failed to return its results"
+            )
 
         total_shards = sum(shards_per_job)
         total_num_examples = sum(examples_per_job)
@@ -1858,6 +1832,7 @@ class ArrowBasedBuilder(DatasetBuilder):
     def _prepare_split_single(
         self, gen_kwargs: dict, fpath: str, file_format: str, max_shard_size: int, job_id: int
     ) -> Iterable[Tuple[int, bool, Union[int, tuple]]]:
+        gen_kwargs = {k: tracked_list(v) if isinstance(v, list) else v for k, v in gen_kwargs.items()}
         generator = self._generate_tables(**gen_kwargs)
         writer_class = ParquetWriter if file_format == "parquet" else ArrowWriter
         embed_local_files = file_format == "parquet"
@@ -1891,7 +1866,15 @@ class ArrowBasedBuilder(DatasetBuilder):
                             storage_options=self._fs.storage_options,
                             embed_local_files=embed_local_files,
                         )
-                    writer.write_table(table)
+                    try:
+                        writer.write_table(table)
+                    except CastError as cast_error:
+                        raise DatasetGenerationCastError.from_cast_error(
+                            cast_error=cast_error,
+                            builder_name=self.info.builder_name,
+                            gen_kwargs=gen_kwargs,
+                            token=self.token,
+                        )
                     num_examples_progress_update += len(table)
                     if time.time() > _time + config.PBAR_REFRESH_TIME_INTERVAL:
                         _time = time.time()
@@ -1909,249 +1892,11 @@ class ArrowBasedBuilder(DatasetBuilder):
             # Ignore the writer's error for no examples written to the file if this error was caused by the error in _generate_examples before the first example was yielded
             if isinstance(e, SchemaInferenceError) and e.__context__ is not None:
                 e = e.__context__
+            if isinstance(e, DatasetGenerationError):
+                raise
             raise DatasetGenerationError("An error occurred while generating the dataset") from e
 
         yield job_id, True, (total_num_examples, total_num_bytes, writer._features, num_shards, shard_lengths)
 
     def _get_examples_iterable_for_split(self, split_generator: SplitGenerator) -> ExamplesIterable:
         return ArrowExamplesIterable(self._generate_tables, kwargs=split_generator.gen_kwargs)
-
-
-class MissingBeamOptions(ValueError):
-    pass
-
-
-class BeamBasedBuilder(DatasetBuilder):
-    """Beam-based Builder."""
-
-    def __init__(self, *args, beam_runner=None, beam_options=None, **kwargs):
-        self._beam_runner = beam_runner
-        self._beam_options = beam_options
-        self._beam_writers = {}  # {split: beam_writer} mapping.
-        super().__init__(*args, **kwargs)
-
-    def _make_split_generators_kwargs(self, prepare_split_kwargs):
-        # Pass `pipeline` into `_split_generators()` from `prepare_split_kwargs` if
-        # it's in the call signature of `_split_generators()`.
-        # This allows for global preprocessing in beam.
-        split_generators_kwargs = {}
-        split_generators_arg_names = inspect.signature(self._split_generators).parameters.keys()
-        if "pipeline" in split_generators_arg_names:
-            split_generators_kwargs["pipeline"] = prepare_split_kwargs["pipeline"]
-        return split_generators_kwargs
-
-    @abc.abstractmethod
-    def _build_pcollection(self, pipeline, **kwargs):
-        """Build the beam pipeline examples for each `SplitGenerator`.
-
-        This function extracts examples from the raw data with parallel transforms
-        in a Beam pipeline. It is called once for each `SplitGenerator` defined in
-        `_split_generators`. The examples from the PCollection will be
-        encoded and written to disk.
-
-        <Tip warning={true}>
-        Warning: When running in a distributed setup, make sure that the data
-        which will be read (download_dir, manual_dir,...) and written (cache_dir)
-        can be accessed by the workers jobs. The data should be located in a
-        shared filesystem, like GCS.
-        </Tip>
-
-        Args:
-            pipeline ([`utils.beam_utils.BeamPipeline`]):
-                Apache Beam pipeline.
-            **kwargs (additional keyword arguments):
-                Arguments forwarded from the SplitGenerator.gen_kwargs.
-
-        Returns:
-            `beam.PCollection`: Apache Beam PCollection containing the
-                example to send to `self.info.features.encode_example(...)`.
-
-        Example:
-
-        ```
-        def _build_pcollection(pipeline, extracted_dir=None):
-            return (
-                    pipeline
-                    | beam.Create(gfile.io.listdir(extracted_dir))
-                    | beam.Map(_process_file)
-            )
-        ```
-        """
-        raise NotImplementedError()
-
-    def _download_and_prepare(self, dl_manager, verification_mode, **prepare_splits_kwargs):
-        # Create the Beam pipeline and forward it to `_prepare_split`
-        import apache_beam as beam
-
-        import datasets.utils.beam_utils as beam_utils
-
-        beam_runner = self._beam_runner
-        beam_options = self._beam_options
-
-        if not beam_runner and not beam_options:
-            usage_example = f"load_dataset('{self.name}', '{self.config.name}', beam_runner='DirectRunner')"
-            raise MissingBeamOptions(
-                "Trying to generate a dataset using Apache Beam, yet no Beam Runner "
-                "or PipelineOptions() has been provided in `load_dataset` or in the "
-                "builder arguments. For big datasets it has to run on large-scale data "
-                "processing tools like Dataflow, Spark, etc. More information about "
-                "Apache Beam runners at "
-                "https://beam.apache.org/documentation/runners/capability-matrix/"
-                "\nIf you really want to run it locally because you feel like the "
-                "Dataset is small enough, you can use the local beam runner called "
-                "`DirectRunner` (you may run out of memory). \nExample of usage: "
-                f"\n\t`{usage_example}`"
-            )
-        if self._writer_batch_size is not None:
-            logger.warning(
-                "`writer_batch_size` is not supported for beam pipelines yet. Using the default chunk size for writing."
-            )
-
-        # Beam type checking assumes transforms multiple outputs are of same type,
-        # which is not our case. Plus it doesn't handle correctly all types, so we
-        # are better without it.
-        pipeline_options = {"pipeline_type_check": False}
-        if "num_proc" in prepare_splits_kwargs:
-            num_workers = prepare_splits_kwargs.pop("num_proc")
-            pipeline_options["direct_num_workers"] = num_workers
-            pipeline_options["num_workers"] = num_workers
-            pipeline_options["direct_running_mode"] = "multi_processing"
-            # TODO: Fix ModuleNotFoundError: No module named 'datasets_modules' when running multiprocessed DirectRunner
-            raise NotImplementedError("Using a DirectRunner with `num_proc` for multiprocessing it not supported yet.")
-        beam_options = beam_options or beam.options.pipeline_options.PipelineOptions.from_dictionary(pipeline_options)
-        # Use a single pipeline for all splits
-        pipeline = beam_utils.BeamPipeline(
-            runner=beam_runner,
-            options=beam_options,
-        )
-        super()._download_and_prepare(
-            dl_manager, verification_mode=VerificationMode.NO_CHECKS, pipeline=pipeline, **prepare_splits_kwargs
-        )  # TODO handle verification_mode in beam datasets
-        # Run pipeline
-        pipeline_results = pipeline.run()
-        pipeline_results.wait_until_finish()
-        metrics = pipeline_results.metrics()
-        # Update `info.splits`.
-        split_dict = self.info.splits
-        for split_name, beam_writer in self._beam_writers.items():
-            m_filter = beam.metrics.MetricsFilter().with_namespace(namespace=split_name)
-            num_examples, num_bytes = beam_writer.finalize(metrics.query(m_filter))
-            split_info = split_dict[split_name]
-            split_info.num_examples = num_examples
-            split_info.num_bytes = num_bytes
-            if hasattr(beam_writer, "_shard_lengths") and len(beam_writer._shard_lengths) > 1:
-                # keep the -SSSSS-of-NNNNN pattern
-                split_info.shard_lengths = beam_writer._shard_lengths
-            else:
-                # don't use any pattern
-                file_format = prepare_splits_kwargs.get("file_format", "arrow")
-                src_fname = f"{self.name}-{split_name}-00000-of-00001.{file_format}"
-                dst_fname = f"{self.name}-{split_name}.{file_format}"
-                path_join = os.path.join if not is_remote_filesystem(self._fs) else posixpath.join
-                src_fpath = path_join(self._output_dir, src_fname)
-                dst_fpath = path_join(self._output_dir, dst_fname)
-                self._rename(src_fpath, dst_fpath)
-
-    def _save_info(self):
-        import apache_beam as beam
-
-        fs = beam.io.filesystems.FileSystems
-        path_join = os.path.join if not is_remote_filesystem(self._fs) else posixpath.join
-        with fs.create(path_join(self._output_dir, config.DATASET_INFO_FILENAME)) as f:
-            self.info._dump_info(f)
-        if self.info.license:
-            with fs.create(path_join(self._output_dir, config.LICENSE_FILENAME)) as f:
-                self.info._dump_license(f)
-
-    def _prepare_split(
-        self, split_generator, pipeline, file_format="arrow", max_shard_size: Optional[Union[str, int]] = None
-    ):
-        import apache_beam as beam
-
-        if max_shard_size is not None:
-            raise NotImplementedError(
-                "max_shard_size is not supported for Beam datasets."
-                "Please set it to None to use the default Apache Beam sharding and get the best performance."
-            )
-
-        # To write examples in filesystem:
-        split_name = split_generator.split_info.name
-        fname = f"{self.name}-{split_name}.{file_format}"
-        path_join = os.path.join if not is_remote_filesystem(self._fs) else posixpath.join
-        fpath = path_join(self._output_dir, fname)
-        beam_writer = BeamWriter(
-            features=self.info.features, path=fpath, namespace=split_name, cache_dir=self._output_dir
-        )
-        self._beam_writers[split_name] = beam_writer
-
-        encode_example = self.info.features.encode_example
-
-        # Note: We need to wrap the pipeline in a PTransform to avoid re-using the
-        # same label names for each split
-        @beam.ptransform_fn
-        def _build_pcollection(pipeline):
-            """PTransformation which build a single split."""
-            # Encode the PCollection
-            pcoll_examples = self._build_pcollection(pipeline, **split_generator.gen_kwargs)
-            pcoll_examples |= "Encode" >> beam.Map(lambda key_ex: (key_ex[0], encode_example(key_ex[1])))
-            return beam_writer.write_from_pcollection(pcoll_examples)
-
-        # Add the PCollection to the pipeline
-        _ = pipeline | split_name >> _build_pcollection()  # pylint: disable=no-value-for-parameter max_bytes_per_shard
-
-    def as_streaming_dataset(
-        self,
-        split: Optional[str] = None,
-    ) -> Union[Dict[str, IterableDataset], IterableDataset]:
-        self._request_info_from_hf_gcs()
-        datasets = {
-            split.name: IterableDataset(self._get_examples_iterable_for_split(split), info=self.info, split=split.name)
-            for split in self.info.splits.values()
-        }
-        if split:
-            try:
-                datasets = datasets[split]
-            except KeyError:
-                raise ValueError(f"Bad split: {split}. Available splits: {list(datasets)}")
-        if isinstance(datasets, dict):
-            datasets = IterableDatasetDict(datasets)
-        return datasets
-
-    def _get_examples_iterable_for_split(self, split: SplitInfo) -> ExamplesIterable:
-        return ExamplesIterable(self._generate_examples_from_hf_gcs, {"split": split})
-
-    def _generate_examples_from_hf_gcs(self, split: SplitInfo):
-        if split.shard_lengths:
-            num_shards = len(split.shard_lengths)
-            remote_prepared_urls = [
-                f"{self._remote_cache_dir_from_hf_gcs}/{self.name}-{split.name}-{shard_id:05d}-of-{num_shards:05d}.arrow"
-                for shard_id in range(num_shards)
-            ]
-        else:
-            remote_prepared_urls = [f"{self._remote_cache_dir_from_hf_gcs}/{self.name}-{split.name}.arrow"]
-        key = 0
-        for remote_prepared_url in remote_prepared_urls:
-            with xopen(remote_prepared_url, "rb") as f:
-                with pa.ipc.open_stream(f) as reader:
-                    for record_batch in reader:
-                        for record in record_batch.to_pylist():
-                            yield key, record
-                            key += 1
-
-    def _request_info_from_hf_gcs(self):
-        from .download.streaming_download_manager import xopen
-
-        remote_dataset_info = f"{self._remote_cache_dir_from_hf_gcs}/{config.DATASET_INFO_FILENAME}"
-        try:
-            with xopen(remote_dataset_info) as f:
-                import json
-
-                _info = json.load(f)
-        except FileNotFoundError as err:
-            raise DatasetNotOnHfGcsError(err) from None
-        self.info.update(DatasetInfo.from_dict(_info))
-
-    @property
-    def _remote_cache_dir_from_hf_gcs(self):
-        relative_data_dir = self._relative_data_dir(with_hash=False)
-        return HF_GCP_BASE_URL + "/" + relative_data_dir.replace(os.sep, "/")

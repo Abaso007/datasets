@@ -7,6 +7,7 @@ import tarfile
 import textwrap
 import zipfile
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -59,6 +60,11 @@ def arrow_file(tmp_path_factory, dataset):
 FILE_CONTENT = """\
     Text data.
     Second line of data."""
+
+
+@pytest.fixture(scope="session")
+def text_file_content():
+    return FILE_CONTENT
 
 
 @pytest.fixture(scope="session")
@@ -289,7 +295,7 @@ def bz2_csv_path(csv_path, tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def zip_csv_path(csv_path, csv2_path, tmp_path_factory):
-    path = tmp_path_factory.mktemp("data") / "dataset.csv.zip"
+    path = tmp_path_factory.mktemp("zip_csv_path") / "csv-dataset.zip"
     with zipfile.ZipFile(path, "w") as f:
         f.write(csv_path, arcname=os.path.basename(csv_path))
         f.write(csv2_path, arcname=os.path.basename(csv2_path))
@@ -329,6 +335,14 @@ def parquet_path(tmp_path_factory):
         pa_table = pa.Table.from_pydict({k: [DATA[i][k] for i in range(len(DATA))] for k in DATA[0]}, schema=schema)
         writer.write_table(pa_table)
         writer.close()
+    return path
+
+
+@pytest.fixture(scope="session")
+def geoparquet_path(tmp_path_factory):
+    df = pd.read_parquet(path="https://github.com/opengeospatial/geoparquet/raw/v1.0.0/examples/example.parquet")
+    path = str(tmp_path_factory.mktemp("data") / "dataset.geoparquet")
+    df.to_parquet(path=path)
     return path
 
 
@@ -472,6 +486,26 @@ def text2_path(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def text_dir(tmp_path_factory):
+    data = ["0", "1", "2", "3"]
+    path = tmp_path_factory.mktemp("data_text_dir") / "dataset.txt"
+    with open(path, "w") as f:
+        for item in data:
+            f.write(item + "\n")
+    return path.parent
+
+
+@pytest.fixture(scope="session")
+def text_dir_with_unsupported_extension(tmp_path_factory):
+    data = ["0", "1", "2", "3"]
+    path = tmp_path_factory.mktemp("data") / "dataset.abc"
+    with open(path, "w") as f:
+        for item in data:
+            f.write(item + "\n")
+    return path
+
+
+@pytest.fixture(scope="session")
 def zip_text_path(text_path, text2_path, tmp_path_factory):
     path = tmp_path_factory.mktemp("data") / "dataset.text.zip"
     with zipfile.ZipFile(path, "w") as f:
@@ -515,6 +549,16 @@ def image_file():
 @pytest.fixture(scope="session")
 def audio_file():
     return os.path.join("tests", "features", "data", "test_audio_44100.wav")
+
+
+@pytest.fixture(scope="session")
+def tensor_file(tmp_path_factory):
+    import torch
+
+    path = tmp_path_factory.mktemp("data") / "tensor.pth"
+    with open(path, "wb") as f:
+        torch.save(torch.ones(128), f)
+    return path
 
 
 @pytest.fixture(scope="session")

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 from collections.abc import Mapping, MutableMapping
 from functools import partial
 
@@ -186,14 +187,20 @@ class NumpyArrowExtractor(BaseArrowExtractor[dict, np.ndarray, dict]):
             else:
                 zero_copy_only = _is_zero_copy_only(pa_array.type) and not _is_array_with_nulls(pa_array)
                 array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only).tolist()
+
         if len(array) > 0:
             if any(
                 (isinstance(x, np.ndarray) and (x.dtype == object or x.shape != array[0].shape))
                 or (isinstance(x, float) and np.isnan(x))
                 for x in array
             ):
+                if np.lib.NumpyVersion(np.__version__) >= "2.0.0b1":
+                    return np.asarray(array, dtype=object)
                 return np.array(array, copy=False, dtype=object)
-        return np.array(array, copy=False)
+        if np.lib.NumpyVersion(np.__version__) >= "2.0.0b1":
+            return np.asarray(array)
+        else:
+            return np.array(array, copy=False)
 
 
 class PandasArrowExtractor(BaseArrowExtractor[pd.DataFrame, pd.Series, pd.DataFrame]):
@@ -208,11 +215,14 @@ class PandasArrowExtractor(BaseArrowExtractor[pd.DataFrame, pd.Series, pd.DataFr
 
 
 class PythonFeaturesDecoder:
-    def __init__(self, features: Optional[Features]):
+    def __init__(
+        self, features: Optional[Features], token_per_repo_id: Optional[Dict[str, Union[str, bool, None]]] = None
+    ):
         self.features = features
+        self.token_per_repo_id = token_per_repo_id
 
     def decode_row(self, row: dict) -> dict:
-        return self.features.decode_example(row) if self.features else row
+        return self.features.decode_example(row, token_per_repo_id=self.token_per_repo_id) if self.features else row
 
     def decode_column(self, column: list, column_name: str) -> list:
         return self.features.decode_column(column, column_name) if self.features else column
@@ -386,9 +396,14 @@ class Formatter(Generic[RowFormat, ColumnFormat, BatchFormat]):
     numpy_arrow_extractor = NumpyArrowExtractor
     pandas_arrow_extractor = PandasArrowExtractor
 
-    def __init__(self, features: Optional[Features] = None):
+    def __init__(
+        self,
+        features: Optional[Features] = None,
+        token_per_repo_id: Optional[Dict[str, Union[str, bool, None]]] = None,
+    ):
         self.features = features
-        self.python_features_decoder = PythonFeaturesDecoder(self.features)
+        self.token_per_repo_id = token_per_repo_id
+        self.python_features_decoder = PythonFeaturesDecoder(self.features, self.token_per_repo_id)
         self.pandas_features_decoder = PandasFeaturesDecoder(self.features)
 
     def __call__(self, pa_table: pa.Table, query_type: str) -> Union[RowFormat, ColumnFormat, BatchFormat]:
@@ -409,6 +424,11 @@ class Formatter(Generic[RowFormat, ColumnFormat, BatchFormat]):
         raise NotImplementedError
 
 
+class TensorFormatter(Formatter[RowFormat, ColumnFormat, BatchFormat]):
+    def recursive_tensorize(self, data_struct: dict):
+        raise NotImplementedError
+
+
 class ArrowFormatter(Formatter[pa.Table, pa.Array, pa.Table]):
     def format_row(self, pa_table: pa.Table) -> pa.Table:
         return self.simple_arrow_extractor().extract_row(pa_table)
@@ -421,8 +441,8 @@ class ArrowFormatter(Formatter[pa.Table, pa.Array, pa.Table]):
 
 
 class PythonFormatter(Formatter[Mapping, list, Mapping]):
-    def __init__(self, features=None, lazy=False):
-        super().__init__(features)
+    def __init__(self, features=None, lazy=False, token_per_repo_id=None):
+        super().__init__(features, token_per_repo_id)
         self.lazy = lazy
 
     def format_row(self, pa_table: pa.Table) -> Mapping:
@@ -472,8 +492,8 @@ class CustomFormatter(Formatter[dict, ColumnFormat, dict]):
     to return.
     """
 
-    def __init__(self, transform: Callable[[dict], dict], features=None, **kwargs):
-        super().__init__(features=features)
+    def __init__(self, transform: Callable[[dict], dict], features=None, token_per_repo_id=None, **kwargs):
+        super().__init__(features=features, token_per_repo_id=token_per_repo_id)
         self.transform = transform
 
     def format_row(self, pa_table: pa.Table) -> dict:
@@ -570,7 +590,10 @@ def query_table(
     """
     # Check if key is valid
     if not isinstance(key, (int, slice, range, str, Iterable)):
-        _raise_bad_key_type(key)
+        try:
+            key = operator.index(key)
+        except TypeError:
+            _raise_bad_key_type(key)
     if isinstance(key, str):
         _check_valid_column_key(key, table.column_names)
     else:
@@ -619,7 +642,7 @@ def format_table(
     else:
         pa_table = table
     query_type = key_to_query_type(key)
-    python_formatter = PythonFormatter(features=None)
+    python_formatter = PythonFormatter(features=formatter.features)
     if format_columns is None:
         return formatter(pa_table, query_type=query_type)
     elif query_type == "column":

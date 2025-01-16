@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Logging utilities. """
+"""Logging utilities."""
 
 import logging
 import os
@@ -27,7 +27,12 @@ from logging import (
 )
 from typing import Optional
 
-from tqdm import auto as tqdm_lib
+from .tqdm import (  # noqa: F401 # imported for backward compatibility
+    disable_progress_bar,
+    enable_progress_bar,
+    is_progress_bar_enabled,
+    tqdm,
+)
 
 
 log_levels = {
@@ -52,8 +57,7 @@ def _get_default_logging_level():
             return log_levels[env_level_str]
         else:
             logging.getLogger().warning(
-                f"Unknown option DATASETS_VERBOSITY={env_level_str}, "
-                f"has to be one of: { ', '.join(log_levels.keys()) }"
+                f"Unknown option DATASETS_VERBOSITY={env_level_str}, has to be one of: {', '.join(log_levels.keys())}"
             )
     return _default_log_level
 
@@ -69,6 +73,7 @@ def _get_library_root_logger() -> logging.Logger:
 def _configure_library_root_logger() -> None:
     # Apply our default configuration to the library root logger.
     library_root_logger = _get_library_root_logger()
+    library_root_logger.addHandler(logging.StreamHandler())
     library_root_logger.setLevel(_get_default_logging_level())
 
 
@@ -171,68 +176,3 @@ def enable_propagation() -> None:
 
 # Configure the library root logger at the module level (singleton-like)
 _configure_library_root_logger()
-
-
-class EmptyTqdm:
-    """Dummy tqdm which doesn't do anything."""
-
-    def __init__(self, *args, **kwargs):  # pylint: disable=unused-argument
-        self._iterator = args[0] if args else None
-
-    def __iter__(self):
-        return iter(self._iterator)
-
-    def __getattr__(self, _):
-        """Return empty function."""
-
-        def empty_fn(*args, **kwargs):  # pylint: disable=unused-argument
-            return
-
-        return empty_fn
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, type_, value, traceback):
-        return
-
-
-_tqdm_active = True
-
-
-class _tqdm_cls:
-    def __call__(self, *args, disable=False, **kwargs):
-        if _tqdm_active and not disable:
-            return tqdm_lib.tqdm(*args, **kwargs)
-        else:
-            return EmptyTqdm(*args, **kwargs)
-
-    def set_lock(self, *args, **kwargs):
-        self._lock = None
-        if _tqdm_active:
-            return tqdm_lib.tqdm.set_lock(*args, **kwargs)
-
-    def get_lock(self):
-        if _tqdm_active:
-            return tqdm_lib.tqdm.get_lock()
-
-
-tqdm = _tqdm_cls()
-
-
-def is_progress_bar_enabled() -> bool:
-    """Return a boolean indicating whether tqdm progress bars are enabled."""
-    global _tqdm_active
-    return bool(_tqdm_active)
-
-
-def enable_progress_bar():
-    """Enable tqdm progress bar."""
-    global _tqdm_active
-    _tqdm_active = True
-
-
-def disable_progress_bar():
-    """Disable tqdm progress bar."""
-    global _tqdm_active
-    _tqdm_active = False

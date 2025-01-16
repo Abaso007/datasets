@@ -7,7 +7,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from datasets import Audio, Features, Image
+from datasets import Audio, Features, Image, IterableDataset
 from datasets.formatting import NumpyFormatter, PandasFormatter, PythonFormatter, query_table
 from datasets.formatting.formatting import (
     LazyBatch,
@@ -18,7 +18,34 @@ from datasets.formatting.formatting import (
 )
 from datasets.table import InMemoryTable
 
-from .utils import require_jax, require_pil, require_sndfile, require_tf, require_torch
+from .utils import (
+    require_jax,
+    require_librosa,
+    require_numpy1_on_windows,
+    require_pil,
+    require_polars,
+    require_sndfile,
+    require_tf,
+    require_torch,
+)
+
+
+class AnyArray:
+    def __init__(self, data) -> None:
+        self.data = data
+
+    def __array__(self) -> np.ndarray:
+        return np.asarray(self.data)
+
+
+def _gen_any_arrays():
+    for _ in range(10):
+        yield {"array": AnyArray(list(range(10)))}
+
+
+@pytest.fixture
+def any_arrays_dataset():
+    return IterableDataset.from_generator(_gen_any_arrays)
 
 
 _COL_A = [0, 1, 2]
@@ -58,7 +85,7 @@ class ArrowExtractorTest(TestCase):
         np.testing.assert_equal(batch, {"a": np.array(_COL_A), "b": np.array(_COL_B)})
 
     def test_numpy_extractor_nested(self):
-        pa_table = self._create_dummy_table().drop(["a", "b"])
+        pa_table = self._create_dummy_table().drop(["a", "b", "d"])
         extractor = NumpyArrowExtractor()
         row = extractor.extract_row(pa_table)
         self.assertEqual(row["c"][0].dtype, np.float64)
@@ -91,14 +118,93 @@ class ArrowExtractorTest(TestCase):
         self.assertIsInstance(row, pd.DataFrame)
         pd.testing.assert_series_equal(row["a"], pd.Series(_COL_A, name="a")[:1])
         pd.testing.assert_series_equal(row["b"], pd.Series(_COL_B, name="b")[:1])
-        pd.testing.assert_series_equal(row["d"], pd.Series(_COL_D, name="d")[:1])
         col = extractor.extract_column(pa_table)
         pd.testing.assert_series_equal(col, pd.Series(_COL_A, name="a"))
         batch = extractor.extract_batch(pa_table)
         self.assertIsInstance(batch, pd.DataFrame)
         pd.testing.assert_series_equal(batch["a"], pd.Series(_COL_A, name="a"))
         pd.testing.assert_series_equal(batch["b"], pd.Series(_COL_B, name="b"))
-        pd.testing.assert_series_equal(batch["d"], pd.Series(_COL_D, name="d"))
+
+    def test_pandas_extractor_nested(self):
+        pa_table = self._create_dummy_table().drop(["a", "b", "d"])
+        extractor = PandasArrowExtractor()
+        row = extractor.extract_row(pa_table)
+        self.assertEqual(row["c"][0][0].dtype, np.float64)
+        self.assertEqual(row["c"].dtype, object)
+        col = extractor.extract_column(pa_table)
+        self.assertEqual(col[0][0].dtype, np.float64)
+        self.assertEqual(col[0].dtype, object)
+        self.assertEqual(col.dtype, object)
+        batch = extractor.extract_batch(pa_table)
+        self.assertEqual(batch["c"][0][0].dtype, np.float64)
+        self.assertEqual(batch["c"][0].dtype, object)
+        self.assertEqual(batch["c"].dtype, object)
+
+    def test_pandas_extractor_temporal(self):
+        pa_table = self._create_dummy_table().drop(["a", "b", "c"])
+        extractor = PandasArrowExtractor()
+        row = extractor.extract_row(pa_table)
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(row["d"].dtype))
+        col = extractor.extract_column(pa_table)
+        self.assertTrue(isinstance(col[0], datetime.datetime))
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(col.dtype))
+        batch = extractor.extract_batch(pa_table)
+        self.assertTrue(isinstance(batch["d"][0], datetime.datetime))
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(batch["d"].dtype))
+
+    @require_polars
+    def test_polars_extractor(self):
+        import polars as pl
+
+        from datasets.formatting.polars_formatter import PolarsArrowExtractor
+
+        pa_table = self._create_dummy_table()
+        extractor = PolarsArrowExtractor()
+        row = extractor.extract_row(pa_table)
+        self.assertIsInstance(row, pl.DataFrame)
+        assert pl.Series.eq(row["a"], pl.Series("a", _COL_A)[:1]).all()
+        assert pl.Series.eq(row["b"], pl.Series("b", _COL_B)[:1]).all()
+        col = extractor.extract_column(pa_table)
+        assert pl.Series.eq(col, pl.Series("a", _COL_A)).all()
+        batch = extractor.extract_batch(pa_table)
+        self.assertIsInstance(batch, pl.DataFrame)
+        assert pl.Series.eq(batch["a"], pl.Series("a", _COL_A)).all()
+        assert pl.Series.eq(batch["b"], pl.Series("b", _COL_B)).all()
+
+    @require_polars
+    def test_polars_nested(self):
+        import polars as pl
+
+        from datasets.formatting.polars_formatter import PolarsArrowExtractor
+
+        pa_table = self._create_dummy_table().drop(["a", "b", "d"])
+        extractor = PolarsArrowExtractor()
+        row = extractor.extract_row(pa_table)
+        self.assertEqual(row["c"][0][0].dtype, pl.Float64)
+        self.assertEqual(row["c"].dtype, pl.List(pl.List(pl.Float64)))
+        col = extractor.extract_column(pa_table)
+        self.assertEqual(col[0][0].dtype, pl.Float64)
+        self.assertEqual(col[0].dtype, pl.List(pl.Float64))
+        self.assertEqual(col.dtype, pl.List(pl.List(pl.Float64)))
+        batch = extractor.extract_batch(pa_table)
+        self.assertEqual(batch["c"][0][0].dtype, pl.Float64)
+        self.assertEqual(batch["c"][0].dtype, pl.List(pl.Float64))
+        self.assertEqual(batch["c"].dtype, pl.List(pl.List(pl.Float64)))
+
+    @require_polars
+    def test_polars_temporal(self):
+        from datasets.formatting.polars_formatter import PolarsArrowExtractor
+
+        pa_table = self._create_dummy_table().drop(["a", "b", "c"])
+        extractor = PolarsArrowExtractor()
+        row = extractor.extract_row(pa_table)
+        self.assertTrue(row["d"].dtype.is_temporal())
+        col = extractor.extract_column(pa_table)
+        self.assertTrue(isinstance(col[0], datetime.datetime))
+        self.assertTrue(col.dtype.is_temporal())
+        batch = extractor.extract_batch(pa_table)
+        self.assertTrue(isinstance(batch["d"][0], datetime.datetime))
+        self.assertTrue(batch["d"].dtype.is_temporal())
 
 
 class LazyDictTest(TestCase):
@@ -203,6 +309,7 @@ class FormatterTest(TestCase):
         self.assertEqual(batch["image"][0].dtype, np.uint8)
         self.assertEqual(batch["image"][0].shape, (480, 640, 3))
 
+    @require_librosa
     @require_sndfile
     def test_numpy_formatter_audio(self):
         pa_table = pa.table({"audio": [{"bytes": None, "path": str(AUDIO_PATH_1)}]})
@@ -228,6 +335,26 @@ class FormatterTest(TestCase):
         pd.testing.assert_series_equal(batch["a"], pd.Series(_COL_A, name="a"))
         pd.testing.assert_series_equal(batch["b"], pd.Series(_COL_B, name="b"))
 
+    @require_polars
+    def test_polars_formatter(self):
+        import polars as pl
+
+        from datasets.formatting import PolarsFormatter
+
+        pa_table = self._create_dummy_table()
+        formatter = PolarsFormatter()
+        row = formatter.format_row(pa_table)
+        self.assertIsInstance(row, pl.DataFrame)
+        assert pl.Series.eq(row["a"], pl.Series("a", _COL_A)[:1]).all()
+        assert pl.Series.eq(row["b"], pl.Series("b", _COL_B)[:1]).all()
+        col = formatter.format_column(pa_table)
+        assert pl.Series.eq(col, pl.Series("a", _COL_A)).all()
+        batch = formatter.format_batch(pa_table)
+        self.assertIsInstance(batch, pl.DataFrame)
+        assert pl.Series.eq(batch["a"], pl.Series("a", _COL_A)).all()
+        assert pl.Series.eq(batch["b"], pl.Series("b", _COL_B)).all()
+
+    @require_numpy1_on_windows
     @require_torch
     def test_torch_formatter(self):
         import torch
@@ -248,6 +375,7 @@ class FormatterTest(TestCase):
         torch.testing.assert_close(batch["c"], torch.tensor(_COL_C, dtype=torch.float32))
         assert batch["c"].shape == np.array(_COL_C).shape
 
+    @require_numpy1_on_windows
     @require_torch
     def test_torch_formatter_torch_tensor_kwargs(self):
         import torch
@@ -264,6 +392,7 @@ class FormatterTest(TestCase):
         self.assertEqual(batch["a"].dtype, torch.float16)
         self.assertEqual(batch["c"].dtype, torch.float16)
 
+    @require_numpy1_on_windows
     @require_torch
     @require_pil
     def test_torch_formatter_image(self):
@@ -276,13 +405,14 @@ class FormatterTest(TestCase):
         formatter = TorchFormatter(features=Features({"image": Image()}))
         row = formatter.format_row(pa_table)
         self.assertEqual(row["image"].dtype, torch.uint8)
-        self.assertEqual(row["image"].shape, (480, 640, 3))
+        # torch uses CHW format contrary to numpy which uses HWC
+        self.assertEqual(row["image"].shape, (3, 480, 640))
         col = formatter.format_column(pa_table)
         self.assertEqual(col.dtype, torch.uint8)
-        self.assertEqual(col.shape, (2, 480, 640, 3))
+        self.assertEqual(col.shape, (2, 3, 480, 640))
         batch = formatter.format_batch(pa_table)
         self.assertEqual(batch["image"].dtype, torch.uint8)
-        self.assertEqual(batch["image"].shape, (2, 480, 640, 3))
+        self.assertEqual(batch["image"].shape, (2, 3, 480, 640))
 
         # different dimensions
         pa_table = pa.table(
@@ -291,17 +421,18 @@ class FormatterTest(TestCase):
         formatter = TorchFormatter(features=Features({"image": Image()}))
         row = formatter.format_row(pa_table)
         self.assertEqual(row["image"].dtype, torch.uint8)
-        self.assertEqual(row["image"].shape, (480, 640, 3))
+        self.assertEqual(row["image"].shape, (3, 480, 640))
         col = formatter.format_column(pa_table)
         self.assertIsInstance(col, list)
         self.assertEqual(col[0].dtype, torch.uint8)
-        self.assertEqual(col[0].shape, (480, 640, 3))
+        self.assertEqual(col[0].shape, (3, 480, 640))
         batch = formatter.format_batch(pa_table)
         self.assertIsInstance(batch["image"], list)
         self.assertEqual(batch["image"][0].dtype, torch.uint8)
-        self.assertEqual(batch["image"][0].shape, (480, 640, 3))
+        self.assertEqual(batch["image"][0].shape, (3, 480, 640))
 
     @require_torch
+    @require_librosa
     @require_sndfile
     def test_torch_formatter_audio(self):
         import torch
@@ -485,6 +616,7 @@ class FormatterTest(TestCase):
         self.assertEqual(batch["image"][0].shape, (480, 640, 3))
 
     @require_jax
+    @require_librosa
     @require_sndfile
     def test_jax_formatter_audio(self):
         import jax.numpy as jnp
@@ -510,13 +642,13 @@ class FormatterTest(TestCase):
         device = jax.devices()[0]
         formatter = JaxFormatter(device=str(device))
         row = formatter.format_row(pa_table)
-        assert row["a"].device() == device
-        assert row["c"].device() == device
+        assert row["a"].devices().pop() == device
+        assert row["c"].devices().pop() == device
         col = formatter.format_column(pa_table)
-        assert col.device() == device
+        assert col.devices().pop() == device
         batch = formatter.format_batch(pa_table)
-        assert batch["a"].device() == device
-        assert batch["c"].device() == device
+        assert batch["a"].devices().pop() == device
+        assert batch["c"].devices().pop() == device
 
 
 class QueryTest(TestCase):
@@ -762,6 +894,33 @@ class QueryTest(TestCase):
             assert len(indices) < n
             query_table(table, [len(indices)], indices=indices)
 
+    def test_query_table_indexable_type(self):
+        pa_table = self._create_dummy_table()
+        table = InMemoryTable(pa_table)
+        n = pa_table.num_rows
+        # classical usage
+        subtable = query_table(table, np.int64(0))
+        self.assertTableEqual(subtable, pa.Table.from_pydict({"a": _COL_A[:1], "b": _COL_B[:1], "c": _COL_C[:1]}))
+        subtable = query_table(table, np.int64(1))
+        self.assertTableEqual(subtable, pa.Table.from_pydict({"a": _COL_A[1:2], "b": _COL_B[1:2], "c": _COL_C[1:2]}))
+        subtable = query_table(table, np.int64(-1))
+        self.assertTableEqual(subtable, pa.Table.from_pydict({"a": _COL_A[-1:], "b": _COL_B[-1:], "c": _COL_C[-1:]}))
+        # raise an IndexError
+        with self.assertRaises(IndexError):
+            query_table(table, np.int64(n))
+        with self.assertRaises(IndexError):
+            query_table(table, np.int64(-(n + 1)))
+        # with indices
+        indices = InMemoryTable(self._create_dummy_arrow_indices())
+        subtable = query_table(table, np.int64(0), indices=indices)
+        self.assertTableEqual(
+            subtable,
+            pa.Table.from_pydict({"a": [_COL_A[_INDICES[0]]], "b": [_COL_B[_INDICES[0]]], "c": [_COL_C[_INDICES[0]]]}),
+        )
+        with self.assertRaises(IndexError):
+            assert len(indices) < n
+            query_table(table, np.int64(len(indices)), indices=indices)
+
     def test_query_table_invalid_key_type(self):
         pa_table = self._create_dummy_table()
         table = InMemoryTable(pa_table)
@@ -820,6 +979,7 @@ def test_tf_formatter_sets_default_dtypes(cast_schema, arrow_table):
     tf.debugging.assert_equal(batch["col_float"], tf.ragged.constant(list_float, dtype=tf.float32))
 
 
+@require_numpy1_on_windows
 @require_torch
 @pytest.mark.parametrize(
     "cast_schema",
@@ -852,3 +1012,37 @@ def test_torch_formatter_sets_default_dtypes(cast_schema, arrow_table):
     batch = formatter.format_batch(arrow_table)
     torch.testing.assert_close(batch["col_int"], torch.tensor(list_int, dtype=torch.int64))
     torch.testing.assert_close(batch["col_float"], torch.tensor(list_float, dtype=torch.float32))
+
+
+def test_iterable_dataset_of_arrays_format_to_arrow(any_arrays_dataset: IterableDataset):
+    formatted = any_arrays_dataset.with_format("arrow")
+    assert all(isinstance(example, pa.Table) for example in formatted)
+
+
+def test_iterable_dataset_of_arrays_format_to_numpy(any_arrays_dataset: IterableDataset):
+    formatted = any_arrays_dataset.with_format("np")
+    assert all(isinstance(example["array"], np.ndarray) for example in formatted)
+
+
+@require_torch
+def test_iterable_dataset_of_arrays_format_to_torch(any_arrays_dataset: IterableDataset):
+    import torch
+
+    formatted = any_arrays_dataset.with_format("torch")
+    assert all(isinstance(example["array"], torch.Tensor) for example in formatted)
+
+
+@require_tf
+def test_iterable_dataset_of_arrays_format_to_tf(any_arrays_dataset: IterableDataset):
+    import tensorflow as tf
+
+    formatted = any_arrays_dataset.with_format("tf")
+    assert all(isinstance(example["array"], tf.Tensor) for example in formatted)
+
+
+@require_jax
+def test_iterable_dataset_of_arrays_format_to_jax(any_arrays_dataset: IterableDataset):
+    import jax.numpy as jnp
+
+    formatted = any_arrays_dataset.with_format("jax")
+    assert all(isinstance(example["array"], jnp.ndarray) for example in formatted)

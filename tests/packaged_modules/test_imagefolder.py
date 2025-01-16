@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 
 from datasets import ClassLabel, Features, Image, Value
-from datasets.data_files import DataFilesDict, get_data_patterns_locally
+from datasets.builder import InvalidConfigName
+from datasets.data_files import DataFilesDict, DataFilesList, get_data_patterns
 from datasets.download.streaming_download_manager import StreamingDownloadManager
-from datasets.packaged_modules.imagefolder.imagefolder import ImageFolder
+from datasets.packaged_modules.imagefolder.imagefolder import ImageFolder, ImageFolderConfig
 
 from ..utils import require_pil
 
@@ -31,8 +32,8 @@ def data_files_with_labels_no_metadata(tmp_path, image_file):
     image_filename2 = subdir_class_1 / "image_dog.jpg"
     shutil.copyfile(image_file, image_filename2)
 
-    data_files_with_labels_no_metadata = DataFilesDict.from_local_or_remote(
-        get_data_patterns_locally(str(data_dir)), str(data_dir)
+    data_files_with_labels_no_metadata = DataFilesDict.from_patterns(
+        get_data_patterns(str(data_dir)), data_dir.as_posix()
     )
 
     return data_files_with_labels_no_metadata
@@ -132,8 +133,8 @@ def data_files_with_one_split_and_metadata(request, tmp_path, image_file):
     )
     with open(image_metadata_filename, "w", encoding="utf-8") as f:
         f.write(image_metadata)
-    data_files_with_one_split_and_metadata = DataFilesDict.from_local_or_remote(
-        get_data_patterns_locally(data_dir), data_dir
+    data_files_with_one_split_and_metadata = DataFilesDict.from_patterns(
+        get_data_patterns(str(data_dir)), data_dir.as_posix()
     )
     assert len(data_files_with_one_split_and_metadata) == 1
     assert len(data_files_with_one_split_and_metadata["train"]) == 4
@@ -192,8 +193,8 @@ def data_files_with_two_splits_and_metadata(request, tmp_path, image_file):
     )
     with open(test_image_metadata_filename, "w", encoding="utf-8") as f:
         f.write(image_metadata)
-    data_files_with_two_splits_and_metadata = DataFilesDict.from_local_or_remote(
-        get_data_patterns_locally(data_dir), data_dir
+    data_files_with_two_splits_and_metadata = DataFilesDict.from_patterns(
+        get_data_patterns(str(data_dir)), data_dir.as_posix()
     )
     assert len(data_files_with_two_splits_and_metadata) == 2
     assert len(data_files_with_two_splits_and_metadata["train"]) == 3
@@ -232,11 +233,22 @@ def data_files_with_zip_archives(tmp_path, image_file):
     shutil.make_archive(archive_dir, "zip", archive_dir)
     shutil.rmtree(str(archive_dir))
 
-    data_files_with_zip_archives = DataFilesDict.from_local_or_remote(get_data_patterns_locally(data_dir), data_dir)
+    data_files_with_zip_archives = DataFilesDict.from_patterns(get_data_patterns(str(data_dir)), data_dir.as_posix())
 
     assert len(data_files_with_zip_archives) == 1
     assert len(data_files_with_zip_archives["train"]) == 1
     return data_files_with_zip_archives
+
+
+def test_config_raises_when_invalid_name() -> None:
+    with pytest.raises(InvalidConfigName, match="Bad characters"):
+        _ = ImageFolderConfig(name="name-with-*-invalid-character")
+
+
+@pytest.mark.parametrize("data_files", ["str_path", ["str_path"], DataFilesList(["str_path"], [()])])
+def test_config_raises_when_invalid_data_files(data_files) -> None:
+    with pytest.raises(ValueError, match="Expected a DataFilesDict"):
+        _ = ImageFolderConfig(name="name", data_files=data_files)
 
 
 @require_pil
@@ -450,7 +462,7 @@ def test_data_files_with_wrong_metadata_file_name(cache_dir, tmp_path, image_fil
     with open(image_metadata_filename, "w", encoding="utf-8") as f:
         f.write(image_metadata)
 
-    data_files_with_bad_metadata = DataFilesDict.from_local_or_remote(get_data_patterns_locally(data_dir), data_dir)
+    data_files_with_bad_metadata = DataFilesDict.from_patterns(get_data_patterns(str(data_dir)), data_dir.as_posix())
     imagefolder = ImageFolder(data_files=data_files_with_bad_metadata, cache_dir=cache_dir)
     imagefolder.download_and_prepare()
     dataset = imagefolder.as_dataset(split="train")
@@ -472,7 +484,7 @@ def test_data_files_with_wrong_image_file_name_column_in_metadata_file(cache_dir
     with open(image_metadata_filename, "w", encoding="utf-8") as f:
         f.write(image_metadata)
 
-    data_files_with_bad_metadata = DataFilesDict.from_local_or_remote(get_data_patterns_locally(data_dir), data_dir)
+    data_files_with_bad_metadata = DataFilesDict.from_patterns(get_data_patterns(str(data_dir)), data_dir.as_posix())
     imagefolder = ImageFolder(data_files=data_files_with_bad_metadata, cache_dir=cache_dir)
     with pytest.raises(ValueError) as exc_info:
         imagefolder.download_and_prepare()
@@ -502,7 +514,7 @@ def test_data_files_with_with_metadata_in_different_formats(cache_dir, tmp_path,
     with open(image_metadata_filename_csv, "w", encoding="utf-8") as f:
         f.write(image_metadata_csv)
 
-    data_files_with_bad_metadata = DataFilesDict.from_local_or_remote(get_data_patterns_locally(data_dir), data_dir)
+    data_files_with_bad_metadata = DataFilesDict.from_patterns(get_data_patterns(str(data_dir)), data_dir.as_posix())
     imagefolder = ImageFolder(data_files=data_files_with_bad_metadata, cache_dir=cache_dir)
     with pytest.raises(ValueError) as exc_info:
         imagefolder.download_and_prepare()

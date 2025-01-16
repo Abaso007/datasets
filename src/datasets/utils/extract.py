@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Type, Union
 
 from .. import config
-from .filelock import FileLock
+from ._filelock import FileLock
 from .logging import get_logger
 
 
@@ -52,13 +52,11 @@ class ExtractManager:
 class BaseExtractor(ABC):
     @classmethod
     @abstractmethod
-    def is_extractable(cls, path: Union[Path, str], **kwargs) -> bool:
-        ...
+    def is_extractable(cls, path: Union[Path, str], **kwargs) -> bool: ...
 
     @staticmethod
     @abstractmethod
-    def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
-        ...
+    def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None: ...
 
 
 class MagicNumberBaseExtractor(BaseExtractor, ABC):
@@ -130,7 +128,7 @@ class TarExtractor(BaseExtractor):
 
 
 class GzipExtractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\x1F\x8B"]
+    magic_numbers = [b"\x1f\x8b"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -192,7 +190,7 @@ class ZipExtractor(MagicNumberBaseExtractor):
 
 
 class XzExtractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\xFD\x37\x7A\x58\x5A\x00"]
+    magic_numbers = [b"\xfd\x37\x7a\x58\x5a\x00"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -217,7 +215,7 @@ class RarExtractor(MagicNumberBaseExtractor):
 
 
 class ZstdExtractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\x28\xb5\x2F\xFD"]
+    magic_numbers = [b"\x28\xb5\x2f\xfd"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -231,7 +229,7 @@ class ZstdExtractor(MagicNumberBaseExtractor):
 
 
 class Bzip2Extractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\x42\x5A\x68"]
+    magic_numbers = [b"\x42\x5a\x68"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -241,7 +239,7 @@ class Bzip2Extractor(MagicNumberBaseExtractor):
 
 
 class SevenZipExtractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\x37\x7A\xBC\xAF\x27\x1C"]
+    magic_numbers = [b"\x37\x7a\xbc\xaf\x27\x1c"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -255,7 +253,7 @@ class SevenZipExtractor(MagicNumberBaseExtractor):
 
 
 class Lz4Extractor(MagicNumberBaseExtractor):
-    magic_numbers = [b"\x04\x22\x4D\x18"]
+    magic_numbers = [b"\x04\x22\x4d\x18"]
 
     @staticmethod
     def extract(input_path: Union[Path, str], output_path: Union[Path, str]) -> None:
@@ -311,7 +309,7 @@ class Extractor:
         return False if not return_extractor else (False, None)
 
     @classmethod
-    def infer_extractor_format(cls, path: Union[Path, str]) -> str:  # <Added version="2.4.0"/>
+    def infer_extractor_format(cls, path: Union[Path, str]) -> Optional[str]:  # <Added version="2.4.0"/>
         magic_number_max_length = cls._get_magic_number_max_length()
         magic_number = cls._read_magic_number(path, magic_number_max_length)
         for extractor_format, extractor in cls.extractors.items():
@@ -323,31 +321,12 @@ class Extractor:
         cls,
         input_path: Union[Path, str],
         output_path: Union[Path, str],
-        extractor_format: Optional[str] = None,  # <Added version="2.4.0"/>
-        extractor: Optional[BaseExtractor] = "deprecated",
+        extractor_format: str,
     ) -> None:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         # Prevent parallel extractions
         lock_path = str(Path(output_path).with_suffix(".lock"))
         with FileLock(lock_path):
             shutil.rmtree(output_path, ignore_errors=True)
-            if extractor_format or extractor != "deprecated":
-                if extractor != "deprecated" or not isinstance(extractor_format, str):  # passed as positional arg
-                    warnings.warn(
-                        "Parameter 'extractor' was deprecated in version 2.4.0 and will be removed in 3.0.0. "
-                        "Use 'extractor_format' instead.",
-                        category=FutureWarning,
-                    )
-                    extractor = extractor if extractor != "deprecated" else extractor_format
-                else:
-                    extractor = cls.extractors[extractor_format]
-                return extractor.extract(input_path, output_path)
-            else:
-                warnings.warn(
-                    "Parameter 'extractor_format' was made required in version 2.4.0 and not passing it will raise an "
-                    "exception in 3.0.0.",
-                    category=FutureWarning,
-                )
-                for extractor in cls.extractors.values():
-                    if extractor.is_extractable(input_path):
-                        return extractor.extract(input_path, output_path)
+            extractor = cls.extractors[extractor_format]
+            return extractor.extract(input_path, output_path)

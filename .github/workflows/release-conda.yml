@@ -10,14 +10,14 @@ env:
 
 jobs:
   build_and_package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     defaults:
       run:
         shell: bash -l {0}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install miniconda
         uses: conda-incubator/setup-miniconda@v2
@@ -25,8 +25,8 @@ jobs:
           auto-update-conda: true
           auto-activate-base: false
           activate-environment: "build-datasets"
-          python-version: 3.8
-          channels: huggingface,conda-forge
+          python-version: 3.9
+          channels: huggingface
 
       - name: Setup conda env
         run: |
@@ -38,8 +38,8 @@ jobs:
       - name: Build conda packages
         run: |
           conda info
-          conda-build .github/conda
+          conda build .github/conda
 
       - name: Upload to Anaconda
         run: |
-          anaconda upload `conda-build .github/conda --output -c conda-forge` --force
+          anaconda upload `conda build .github/conda --output -c conda-forge` --force

@@ -1,7 +1,6 @@
 from typing import List
 
 import datasets
-from datasets.tasks import AudioClassification
 
 from ..folder_based_builder import folder_based_builder
 
@@ -15,13 +14,15 @@ class AudioFolderConfig(folder_based_builder.FolderBasedBuilderConfig):
     drop_labels: bool = None
     drop_metadata: bool = None
 
+    def __post_init__(self):
+        super().__post_init__()
+
 
 class AudioFolder(folder_based_builder.FolderBasedBuilder):
-    BASE_FEATURE = datasets.Audio()
+    BASE_FEATURE = datasets.Audio
     BASE_COLUMN_NAME = "audio"
     BUILDER_CONFIG_CLASS = AudioFolderConfig
     EXTENSIONS: List[str]  # definition at the bottom of the script
-    CLASSIFICATION_TASK = AudioClassification(audio_column="audio", label_column="label")
 
 
 # Obtained with:
@@ -30,8 +31,8 @@ class AudioFolder(folder_based_builder.FolderBasedBuilder):
 #
 # AUDIO_EXTENSIONS = [f".{format.lower()}" for format in sf.available_formats().keys()]
 #
-# # .mp3 is currently decoded via `torchaudio`, .opus decoding is supported if version of `libsndfile` >= 1.0.30:
-# AUDIO_EXTENSIONS.extend([".mp3", ".opus"])
+# # .opus decoding is supported if libsndfile >= 1.0.31:
+# AUDIO_EXTENSIONS.extend([".opus"])
 # ```
 # We intentionally do not run this code on launch because:
 # (1) Soundfile is an optional dependency, so importing it in global namespace is not allowed

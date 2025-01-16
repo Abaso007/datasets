@@ -46,13 +46,33 @@ def test_split_dataset_by_node_iterable_sharded(shards_per_node):
     gen_kwargs = {"shards": [f"shard_{shard_idx}.txt" for shard_idx in range(num_shards)]}
     full_ds = IterableDataset.from_generator(gen, gen_kwargs=gen_kwargs)
     full_size = len(list(full_ds))
-    assert full_ds.n_shards == world_size * shards_per_node
+    assert full_ds.num_shards == world_size * shards_per_node
     datasets_per_rank = [
         split_dataset_by_node(full_ds, rank=rank, world_size=world_size) for rank in range(world_size)
     ]
-    assert [ds.n_shards for ds in datasets_per_rank] == [shards_per_node] * world_size
+    assert [ds.num_shards for ds in datasets_per_rank] == [shards_per_node] * world_size
     assert sum(len(list(ds)) for ds in datasets_per_rank) == full_size
     assert len({tuple(x.values()) for ds in datasets_per_rank for x in ds}) == full_size
+
+
+def test_split_dataset_by_node_iterable_distributed():
+    def gen():
+        return ({"i": i} for i in range(100))
+
+    world_size = 3
+    num_workers = 3
+    full_ds = IterableDataset.from_generator(gen)
+    full_size = len(list(full_ds))
+    datasets_per_rank = [
+        split_dataset_by_node(full_ds, rank=rank, world_size=world_size) for rank in range(world_size)
+    ]
+    datasets_per_rank_per_worker = [
+        split_dataset_by_node(ds, rank=worker, world_size=num_workers)
+        for ds in datasets_per_rank
+        for worker in range(num_workers)
+    ]
+    assert sum(len(list(ds)) for ds in datasets_per_rank_per_worker) == full_size
+    assert len({tuple(x.values()) for ds in datasets_per_rank_per_worker for x in ds}) == full_size
 
 
 def test_distributed_shuffle_iterable():
@@ -78,12 +98,12 @@ def test_distributed_shuffle_iterable():
 @require_torch
 @pytest.mark.skipif(os.name == "nt", reason="execute_subprocess_async doesn't support windows")
 @pytest.mark.integration
-def test_torch_distributed_launch(streaming):
+def test_torch_distributed_run(streaming):
     nproc_per_node = 2
     master_port = get_torch_dist_unique_port()
-    test_script = Path(__file__).resolve().parent / "distributed_scripts" / "launch_torch_distributed.py"
+    test_script = Path(__file__).resolve().parent / "distributed_scripts" / "run_torch_distributed.py"
     distributed_args = f"""
-        -m torch.distributed.launch
+        -m torch.distributed.run
         --nproc_per_node={nproc_per_node}
         --master_port={master_port}
         {test_script}
@@ -105,12 +125,12 @@ def test_torch_distributed_launch(streaming):
 @require_torch
 @pytest.mark.skipif(os.name == "nt", reason="execute_subprocess_async doesn't support windows")
 @pytest.mark.integration
-def test_torch_distributed_launch_streaming_with_num_workers(nproc_per_node, num_workers):
+def test_torch_distributed_run_streaming_with_num_workers(nproc_per_node, num_workers):
     streaming = True
     master_port = get_torch_dist_unique_port()
-    test_script = Path(__file__).resolve().parent / "distributed_scripts" / "launch_torch_distributed.py"
+    test_script = Path(__file__).resolve().parent / "distributed_scripts" / "run_torch_distributed.py"
     distributed_args = f"""
-        -m torch.distributed.launch
+        -m torch.distributed.run
         --nproc_per_node={nproc_per_node}
         --master_port={master_port}
         {test_script}

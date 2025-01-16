@@ -1,6 +1,7 @@
 import os
 import tarfile
 import warnings
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -88,6 +89,38 @@ def test_image_decode_example(shared_datadir):
 
     with pytest.raises(RuntimeError):
         Image(decode=False).decode_example(image_path)
+
+
+@require_pil
+def test_image_decode_example_with_exif_orientation_tag(shared_datadir):
+    import PIL.Image
+
+    image_path = str(shared_datadir / "test_image_rgb.jpg")
+    buffer = BytesIO()
+    exif = PIL.Image.Exif()
+    exif[PIL.Image.ExifTags.Base.Orientation] = 8  # rotate the image for 90°
+    PIL.Image.open(image_path).save(buffer, format="JPEG", exif=exif.tobytes())
+    image = Image()
+
+    decoded_example = image.decode_example({"path": None, "bytes": buffer.getvalue()})
+
+    assert isinstance(decoded_example, PIL.Image.Image)
+    assert decoded_example.size == (480, 640)  # rotated
+    assert decoded_example.mode == "RGB"
+
+
+@require_pil
+def test_image_change_mode(shared_datadir):
+    import PIL.Image
+
+    image_path = str(shared_datadir / "test_image_rgb.jpg")
+    image = Image(mode="YCbCr")
+    decoded_example = image.decode_example({"path": image_path, "bytes": None})
+
+    assert isinstance(decoded_example, PIL.Image.Image)
+    assert not hasattr(decoded_example, "filename")  # changing the mode drops the filename
+    assert decoded_example.size == (640, 480)
+    assert decoded_example.mode == "YCbCr"
 
 
 @require_pil
@@ -581,7 +614,9 @@ def test_load_dataset_with_image_feature(shared_datadir, data_dir, dataset_loadi
     import PIL.Image
 
     image_path = str(shared_datadir / "test_image_rgb.jpg")
-    dset = load_dataset(dataset_loading_script_dir, split="train", data_dir=data_dir, streaming=streaming)
+    dset = load_dataset(
+        dataset_loading_script_dir, split="train", data_dir=data_dir, streaming=streaming, trust_remote_code=True
+    )
     item = dset[0] if not streaming else next(iter(dset))
     assert item.keys() == {"image", "caption"}
     assert isinstance(item["image"], PIL.Image.Image)
@@ -677,6 +712,7 @@ def test_image_embed_storage(shared_datadir):
         (np.arange(16).reshape(4, 4).astype(np.uint8), "exact_match", "PNG"),
         (np.arange(16).reshape(4, 4).astype(np.uint16), "exact_match", "TIFF"),
         (np.arange(16).reshape(4, 4).astype(np.int64), "downcast->|i4", "TIFF"),
+        (np.arange(16).reshape(4, 4).astype(np.complex128), "error", None),
         (np.arange(16).reshape(2, 2, 4).astype(np.uint8), "exact_match", "PNG"),
         (np.arange(16).reshape(2, 2, 4), "downcast->|u1", "PNG"),
         (np.arange(16).reshape(2, 2, 4).astype(np.float64), "error", None),

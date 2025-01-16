@@ -19,7 +19,7 @@ class TextConfig(datasets.BuilderConfig):
 
     features: Optional[datasets.Features] = None
     encoding: str = "utf-8"
-    errors: Optional[str] = None
+    encoding_errors: Optional[str] = None
     chunksize: int = 10 << 20  # 10MB
     keep_linebreaks: bool = False
     sample_by: str = "line"
@@ -39,13 +39,8 @@ class Text(datasets.ArrowBasedBuilder):
         """
         if not self.config.data_files:
             raise ValueError(f"At least one data file must be specified, but got data_files={self.config.data_files}")
+        dl_manager.download_config.extract_on_the_fly = True
         data_files = dl_manager.download_and_extract(self.config.data_files)
-        if isinstance(data_files, (str, list, tuple)):
-            files = data_files
-            if isinstance(files, str):
-                files = [files]
-            files = [dl_manager.iter_files(file) for file in files]
-            return [datasets.SplitGenerator(name=datasets.Split.TRAIN, gen_kwargs={"files": files})]
         splits = []
         for split_name, files in data_files.items():
             if isinstance(files, str):
@@ -71,7 +66,7 @@ class Text(datasets.ArrowBasedBuilder):
         pa_table_names = list(self.config.features) if self.config.features is not None else ["text"]
         for file_idx, file in enumerate(itertools.chain.from_iterable(files)):
             # open in text mode, by default translates universal newlines ("\n", "\r\n" and "\r") into "\n"
-            with open(file, encoding=self.config.encoding, errors=self.config.errors) as f:
+            with open(file, encoding=self.config.encoding, errors=self.config.encoding_errors) as f:
                 if self.config.sample_by == "line":
                     batch_idx = 0
                     while True:

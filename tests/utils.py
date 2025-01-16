@@ -1,4 +1,5 @@
 import asyncio
+import importlib.metadata
 import os
 import re
 import sys
@@ -18,12 +19,6 @@ import requests
 from packaging import version
 
 from datasets import config
-
-
-if config.PY_VERSION < version.parse("3.8"):
-    import importlib_metadata
-else:
-    import importlib.metadata as importlib_metadata
 
 
 def parse_flag_from_env(key, default=False):
@@ -53,16 +48,11 @@ require_py7zr = pytest.mark.skipif(not config.PY7ZR_AVAILABLE, reason="test requ
 require_zstandard = pytest.mark.skipif(not config.ZSTANDARD_AVAILABLE, reason="test requires zstandard")
 
 # Audio
+require_librosa = pytest.mark.skipif(find_spec("librosa") is None, reason="test requires librosa")
 require_sndfile = pytest.mark.skipif(
     # On Windows and OS X, soundfile installs sndfile
-    find_spec("soundfile") is None or version.parse(importlib_metadata.version("soundfile")) < version.parse("0.12.0"),
+    find_spec("soundfile") is None or version.parse(importlib.metadata.version("soundfile")) < version.parse("0.12.0"),
     reason="test requires sndfile>=0.12.1: 'pip install \"soundfile>=0.12.1\"'; ",
-)
-
-# Beam
-require_beam = pytest.mark.skipif(
-    not config.BEAM_AVAILABLE or config.DILL_VERSION >= version.parse("0.3.2"),
-    reason="test requires apache-beam and a compatible dill version",
 )
 
 # Dill-cloudpickle compatibility
@@ -78,18 +68,12 @@ require_not_windows = pytest.mark.skipif(
 )
 
 
-def require_faiss(test_case):
-    """
-    Decorator marking a test that requires Faiss.
-
-    These tests are skipped when Faiss isn't installed.
-
-    """
-    try:
-        import faiss  # noqa
-    except ImportError:
-        test_case = unittest.skip("test requires faiss")(test_case)
-    return test_case
+require_faiss = pytest.mark.skipif(find_spec("faiss") is None or sys.platform == "win32", reason="test requires faiss")
+require_moto = pytest.mark.skipif(find_spec("moto") is None, reason="test requires moto")
+require_numpy1_on_windows = pytest.mark.skipif(
+    version.parse(importlib.metadata.version("numpy")) >= version.parse("2.0.0") and sys.platform == "win32",
+    reason="test requires numpy < 2.0 on windows",
+)
 
 
 def require_regex(test_case):
@@ -146,6 +130,18 @@ def require_torch(test_case):
     return test_case
 
 
+def require_polars(test_case):
+    """
+    Decorator marking a test that requires Polars.
+
+    These tests are skipped when Polars isn't installed.
+
+    """
+    if not config.POLARS_AVAILABLE:
+        test_case = unittest.skip("test requires Polars")(test_case)
+    return test_case
+
+
 def require_tf(test_case):
     """
     Decorator marking a test that requires TensorFlow.
@@ -179,6 +175,18 @@ def require_pil(test_case):
     """
     if not config.PIL_AVAILABLE:
         test_case = unittest.skip("test requires Pillow")(test_case)
+    return test_case
+
+
+def require_decord(test_case):
+    """
+    Decorator marking a test that requires decord.
+
+    These tests are skipped when decord isn't installed.
+
+    """
+    if not config.DECORD_AVAILABLE:
+        test_case = unittest.skip("test requires decord")(test_case)
     return test_case
 
 
@@ -227,28 +235,6 @@ def require_spacy(test_case):
         return test_case
 
 
-def require_spacy_model(model):
-    """
-    Decorator marking a test that requires a spacy model.
-
-    These tests are skipped when they aren't installed.
-    """
-
-    def _require_spacy_model(test_case):
-        try:
-            import spacy  # noqa F401
-
-            spacy.load(model)
-        except ImportError:
-            return unittest.skip("test requires spacy")(test_case)
-        except OSError:
-            return unittest.skip("test requires spacy model '{}'".format(model))(test_case)
-        else:
-            return test_case
-
-    return _require_spacy_model
-
-
 def require_pyspark(test_case):
     """
     Decorator marking a test that requires pyspark.
@@ -260,6 +246,36 @@ def require_pyspark(test_case):
         import pyspark  # noqa F401
     except ImportError:
         return unittest.skip("test requires pyspark")(test_case)
+    else:
+        return test_case
+
+
+def require_joblibspark(test_case):
+    """
+    Decorator marking a test that requires joblibspark.
+
+    These tests are skipped when pyspark isn't installed.
+
+    """
+    try:
+        import joblibspark  # noqa F401
+    except ImportError:
+        return unittest.skip("test requires joblibspark")(test_case)
+    else:
+        return test_case
+
+
+def require_torchdata_stateful_dataloader(test_case):
+    """
+    Decorator marking a test that requires torchdata.stateful_dataloader.
+
+    These tests are skipped when torchdata with stateful_dataloader module isn't installed.
+
+    """
+    try:
+        import torchdata.stateful_dataloader  # noqa F401
+    except (ImportError, AssertionError):
+        return unittest.skip("test requires torchdata.stateful_dataloader")(test_case)
     else:
         return test_case
 
@@ -332,7 +348,7 @@ class RequestWouldHangIndefinitelyError(Exception):
 class OfflineSimulationMode(Enum):
     CONNECTION_FAILS = 0
     CONNECTION_TIMES_OUT = 1
-    HF_DATASETS_OFFLINE_SET_TO_1 = 2
+    HF_HUB_OFFLINE_SET_TO_1 = 2
 
 
 @contextmanager
@@ -347,7 +363,7 @@ def offline(mode=OfflineSimulationMode.CONNECTION_FAILS, timeout=1e-16):
     CONNECTION_TIMES_OUT: the connection hangs until it times out.
         The default timeout value is low (1e-16) to speed up the tests.
         Timeout errors are created by mocking requests.request
-    HF_DATASETS_OFFLINE_SET_TO_1: the HF_DATASETS_OFFLINE environment variable is set to 1.
+    HF_HUB_OFFLINE_SET_TO_1: the HF_HUB_OFFLINE environment variable is set to 1.
         This makes the http/ftp calls of the library instantly fail and raise an OfflineModeEmabled error.
     """
     online_request = requests.Session().request
@@ -380,8 +396,8 @@ def offline(mode=OfflineSimulationMode.CONNECTION_FAILS, timeout=1e-16):
         # inspired from https://stackoverflow.com/a/904609
         with patch("requests.Session.request", timeout_request):
             yield
-    elif mode is OfflineSimulationMode.HF_DATASETS_OFFLINE_SET_TO_1:
-        with patch("datasets.config.HF_DATASETS_OFFLINE", True):
+    elif mode is OfflineSimulationMode.HF_HUB_OFFLINE_SET_TO_1:
+        with patch("datasets.config.HF_HUB_OFFLINE", True):
             yield
     else:
         raise ValueError("Please use a value from the OfflineSimulationMode enum.")
@@ -534,7 +550,7 @@ def pytest_xdist_worker_id():
 
 def get_torch_dist_unique_port():
     """
-    Returns a port number that can be fed to `torch.distributed.launch`'s `--master_port` argument.
+    Returns a port number that can be fed to `torchrun`'s `--master_port` argument.
 
     Under `pytest-xdist` it adds a delta number based on a worker id so that concurrent tests don't try to use the same
     port at once.

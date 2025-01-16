@@ -4,9 +4,10 @@ import os
 import fsspec
 import pytest
 from fsspec import register_implementation
+from fsspec.core import url_to_fs
 from fsspec.registry import _registry as _fsspec_registry
 
-from datasets.filesystems import COMPRESSION_FILESYSTEMS, HfFileSystem, extract_path_from_uri, is_remote_filesystem
+from datasets.filesystems import COMPRESSION_FILESYSTEMS, is_remote_filesystem
 
 from .utils import require_lz4, require_zstandard
 
@@ -19,17 +20,6 @@ def test_mockfs(mockfs):
 def test_non_mockfs():
     assert "mock" not in _fsspec_registry
     assert "bz2" in _fsspec_registry
-
-
-def test_extract_path_from_uri():
-    mock_bucket = "mock-s3-bucket"
-    dataset_path = f"s3://{mock_bucket}"
-    dataset_path = extract_path_from_uri(dataset_path)
-    assert dataset_path.startswith("s3://") is False
-
-    dataset_path = "./local/path"
-    new_dataset_path = extract_path_from_uri(dataset_path)
-    assert dataset_path == new_dataset_path
 
 
 def test_is_remote_filesystem(mockfs):
@@ -68,20 +58,9 @@ def test_fs_isfile(protocol, zip_jsonl_path, jsonl_gz_path):
     compressed_file_path = compressed_file_paths[protocol]
     member_file_path = "dataset.jsonl"
     path = f"{protocol}://{member_file_path}::{compressed_file_path}"
-    fs, *_ = fsspec.get_fs_token_paths(path)
+    fs, *_ = url_to_fs(path)
     assert fs.isfile(member_file_path)
     assert not fs.isfile("non_existing_" + member_file_path)
-
-
-@pytest.mark.integration
-def test_hf_filesystem(hf_token, hf_api, hf_private_dataset_repo_txt_data, text_file):
-    repo_info = hf_api.dataset_info(hf_private_dataset_repo_txt_data, token=hf_token)
-    hffs = HfFileSystem(repo_info=repo_info, token=hf_token)
-    assert sorted(hffs.glob("*")) == [".gitattributes", "data"]
-    assert hffs.isdir("data")
-    assert hffs.isfile(".gitattributes") and hffs.isfile("data/text_data.txt")
-    with open(text_file) as f:
-        assert hffs.open("data/text_data.txt", "r").read() == f.read()
 
 
 def test_fs_overwrites():

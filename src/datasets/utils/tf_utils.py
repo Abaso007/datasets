@@ -67,24 +67,6 @@ def is_numeric_pa_type(pa_type):
     return pa.types.is_integer(pa_type) or pa.types.is_floating(pa_type) or pa.types.is_decimal(pa_type)
 
 
-def is_numeric_feature(feature):
-    from .. import ClassLabel, Sequence, Value
-    from ..features.features import _ArrayXD
-
-    if isinstance(feature, Sequence):
-        return is_numeric_feature(feature.feature)
-    elif isinstance(feature, list):
-        return is_numeric_feature(feature[0])
-    elif isinstance(feature, _ArrayXD):
-        return is_numeric_pa_type(feature().storage_dtype)
-    elif isinstance(feature, Value):
-        return is_numeric_pa_type(feature())
-    elif isinstance(feature, ClassLabel):
-        return True
-    else:
-        return False
-
-
 def np_get_batch(
     indices, dataset, cols_to_retain, collate_fn, collate_fn_args, columns_to_np_types, return_dict=False
 ):
@@ -296,7 +278,7 @@ class NumpyMultiprocessingGenerator:
         self.cols_to_retain = cols_to_retain
         self.collate_fn = collate_fn
         self.collate_fn_args = collate_fn_args
-        self.string_columns = [col for col, dtype in columns_to_np_types.items() if dtype in (np.unicode_, np.str_)]
+        self.string_columns = [col for col, dtype in columns_to_np_types.items() if dtype is np.str_]
         # Strings will be converted to arrays of single unicode chars, so that we can have a constant itemsize
         self.columns_to_np_types = {
             col: dtype if col not in self.string_columns else np.dtype("U1")
